@@ -64,6 +64,12 @@ function createServer({ config, sessions, auth, eventStore, log = console.error 
         sendJson(res, submission ? 200 : 404, submission ? { ok: true, submission } : { ok: false, error: "submission not found" });
         return;
       }
+      if (parts[0] === "v1" && parts[1] === "submissions" && parts[2]
+        && parts[3] === "outputs" && parts[4] === "ack" && req.method === "POST") {
+        const submission = await sessions.acknowledgeOutputs(decode(parts[2]));
+        sendJson(res, submission ? 200 : 404, submission ? { ok: true, submission } : { ok: false, error: "submission not found" });
+        return;
+      }
       if (req.method === "GET" && url.pathname === "/v1/events") {
         const events = await eventStore.wait({
           after: Number(url.searchParams.get("after") || 0),

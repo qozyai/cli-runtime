@@ -8,6 +8,7 @@ const path = require("node:path");
 const { EventStore } = require("../src/event-store");
 const { Tmux } = require("../src/tmux");
 const { SessionManager } = require("../src/session-manager");
+const { safeId } = require("../src/util");
 
 async function waitFor(fn, timeoutMs = 6000) {
   const deadline = Date.now() + timeoutMs;
@@ -54,6 +55,8 @@ test("independent Claude and Codex sessions serialize their own submissions", as
   assert.equal(codex.status, "ready", JSON.stringify(codex));
 
   const slow = await sessions.submit("main", { message: "SLOW first", idempotencyKey: "one" });
+  const returnedFile = path.join(workspace, ".qozyai", "io", "outbox", `${safeId("main", 16)}_result.txt`);
+  await fs.writeFile(returnedFile, "result data");
   await assert.rejects(() => sessions.submit("main", { message: "must reject" }), /active submission/);
   const parallel = await sessions.submit("delegate:one", { message: "parallel" });
 
@@ -68,7 +71,12 @@ test("independent Claude and Codex sessions serialize their own submissions", as
     }),
   ]);
   assert.match(slowDone.reply, /MOCK_CLAUDE: SLOW first/);
+  assert.deepEqual(slowDone.outputs.map((output) => [output.originalName, output.deliveryStatus]), [["result.txt", "pending"]]);
+  const acknowledged = await sessions.acknowledgeOutputs(slow.submissionId);
+  assert.equal(acknowledged.outputs[0].deliveryStatus, "delivered");
+  await assert.rejects(() => fs.access(returnedFile));
   assert.match(parallelDone.reply, /MOCK_CODEX: parallel/);
+  assert.match(parallelDone.progress.reasoning.at(-1), /Inspecting parallel/);
   assert.doesNotMatch(slowDone.reply, /cli-runtime-submission/);
   assert.doesNotMatch(parallelDone.reply, /cli-runtime-submission/);
 
@@ -76,6 +84,11 @@ test("independent Claude and Codex sessions serialize their own submissions", as
   assert.equal(same.submissionId, slow.submissionId);
   assert.ok(sessions.rawSession("main").providerSessionId);
   assert.ok(sessions.rawSession("delegate:one").providerSessionId);
+  const mainHistory = (await fs.readFile(path.join(workspace, ".qozyai", "history", `${safeId("main", 16)}.jsonl`), "utf8"))
+    .trim().split("\n").map(JSON.parse);
+  assert.equal(mainHistory[0].submissionId, slow.submissionId);
+  assert.match(mainHistory[0].reasoning.at(-1), /Inspecting SLOW first/);
+  await assert.rejects(() => fs.access(path.join(workspace, ".qozyai", "history", "active", `${slow.submissionId}.json`)));
 
   const fork = await sessions.create({
     sessionKey: "delegate:fork",
@@ -106,6 +119,7 @@ test("independent Claude and Codex sessions serialize their own submissions", as
     return value?.status === "completed" ? value : null;
   });
   assert.deepEqual(claudeToolDone.progress.toolUses[0], {
+    callId: "tool-mock",
     tool: "Bash",
     arguments: { command: "true" },
     success: true,
@@ -118,11 +132,26 @@ test("independent Claude and Codex sessions serialize their own submissions", as
     return value?.status === "completed" ? value : null;
   });
   assert.deepEqual(codexToolDone.progress.toolUses[0], {
+    callId: "call-mock",
     tool: "exec",
     arguments: "true",
     success: true,
     error: null,
   });
+
+  const originalUpdateTurn = sessions.workspaceState.updateTurn.bind(sessions.workspaceState);
+  const originalFinishTurn = sessions.workspaceState.finishTurn.bind(sessions.workspaceState);
+  sessions.workspaceState.updateTurn = async () => { throw new Error("active snapshot unavailable"); };
+  sessions.workspaceState.finishTurn = async () => { throw new Error("history unavailable"); };
+  const stateFailure = await sessions.submit("main", { message: "observability failure must not fail this turn" });
+  const stateFailureDone = await waitFor(async () => {
+    const value = await sessions.getSubmission(stateFailure.submissionId);
+    return value?.status === "completed" ? value : null;
+  });
+  assert.match(stateFailureDone.reply, /observability failure must not fail this turn/);
+  assert.match(stateFailureDone.outputError, /history unavailable/);
+  sessions.workspaceState.updateTurn = originalUpdateTurn;
+  sessions.workspaceState.finishTurn = originalFinishTurn;
 
   const output = await sessions.output("main");
   assert.match(output.terminal, /MOCK_CLAUDE/);
@@ -155,4 +184,88 @@ test("independent Claude and Codex sessions serialize their own submissions", as
     return value?.status === "failed" ? value : null;
   });
   assert.match(exitingDone.error, /driver exited \(7\)/);
+});
+
+test("submission preparation reserves the session before asynchronous staging", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-reservation-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const config = { stateDir: path.join(root, "state"), submissionTimeoutMs: 5000 };
+  const events = new EventStore(config.stateDir);
+  await events.init();
+  let enterStaging;
+  let releaseStaging;
+  const stagingEntered = new Promise((resolve) => { enterStaging = resolve; });
+  const stagingGate = new Promise((resolve) => { releaseStaging = resolve; });
+  const workspaceState = {
+    startTurn: async () => {
+      enterStaging();
+      await stagingGate;
+      return { inputs: [], outputBaseline: {}, promptContext: "" };
+    },
+  };
+  const manager = new SessionManager({
+    config,
+    tmux: { has: async () => true },
+    eventStore: events,
+    workspaceState,
+  });
+  await manager.init();
+  const session = {
+    version: 1,
+    sessionKey: "main",
+    driver: "claude",
+    workspace: root,
+    tmuxSessionName: "main",
+    status: "ready",
+    activeSubmissionId: null,
+    lastSubmissionId: null,
+    idempotency: {},
+    createdAt: new Date().toISOString(),
+  };
+  manager.sessions.set(session.sessionKey, session);
+  manager.executeSubmission = async () => {};
+
+  const first = manager.submit("main", { message: "first" });
+  await stagingEntered;
+  await assert.rejects(() => manager.submit("main", { message: "second" }), /active submission/);
+  releaseStaging();
+  const accepted = await first;
+  assert.equal(accepted.status, "accepted");
+});
+
+test("failed submission persistence releases its session reservation", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-reservation-failure-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const config = { stateDir: path.join(root, "state"), submissionTimeoutMs: 5000 };
+  const events = new EventStore(config.stateDir);
+  await events.init();
+  const manager = new SessionManager({
+    config,
+    tmux: { has: async () => true },
+    eventStore: events,
+    workspaceState: {
+      startTurn: async () => ({ inputs: [], outputBaseline: {}, promptContext: "" }),
+    },
+  });
+  await manager.init();
+  const session = {
+    version: 1,
+    sessionKey: "main",
+    driver: "codex",
+    workspace: root,
+    tmuxSessionName: "main",
+    status: "ready",
+    activeSubmissionId: null,
+    lastSubmissionId: null,
+    idempotency: {},
+    createdAt: new Date().toISOString(),
+  };
+  manager.sessions.set(session.sessionKey, session);
+  manager.persistSubmission = async () => { throw new Error("disk full"); };
+
+  await assert.rejects(() => manager.submit("main", { message: "first" }), /disk full/);
+  assert.equal(manager.reserved.has("main"), false);
+  assert.equal(manager.active.has("main"), false);
+  assert.equal(session.status, "ready");
+  assert.equal(session.activeSubmissionId, null);
 });

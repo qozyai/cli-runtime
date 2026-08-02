@@ -14,7 +14,8 @@ const {
   recentScreen,
 } = require("./drivers");
 const { baselineArtifacts, publicProgress, watchArtifacts } = require("./artifacts");
-const { createId, nowIso, readJson, safeId, sleep, tailText, writeAtomic } = require("./util");
+const { createId, nowIso, readJson, safeId, sleep, sleepWithSignal, tailText, writeAtomic } = require("./util");
+const { WorkspaceState } = require("./workspace-state");
 
 function publicSession(session) {
   return {
@@ -41,7 +42,18 @@ function publicSubmission(submission) {
     status: submission.status,
     reply: tailText(submission.reply || "", 20_000) || null,
     error: tailText(submission.error || "", 6000) || null,
-    progress: publicProgress(submission.progress),
+    progress: publicProgress(submission.progress, submission.status),
+    inputs: Array.isArray(submission.inputs) ? submission.inputs : [],
+    outputs: (Array.isArray(submission.outputs) ? submission.outputs : []).map((output) => ({
+      originalName: output.originalName,
+      mimeType: output.mimeType,
+      size: output.size,
+      path: output.path,
+      archivePath: output.archivePath,
+      deliveryStatus: output.deliveryStatus,
+      deliveredAt: output.deliveredAt || null,
+    })),
+    outputError: tailText(submission.outputError || "", 4000) || null,
     acceptedAt: submission.acceptedAt,
     startedAt: submission.startedAt || null,
     completedAt: submission.completedAt || null,
@@ -49,15 +61,17 @@ function publicSubmission(submission) {
 }
 
 class SessionManager {
-  constructor({ config, tmux, eventStore, navigator = null }) {
+  constructor({ config, tmux, eventStore, navigator = null, workspaceState = null }) {
     this.config = config;
     this.tmux = tmux;
     this.eventStore = eventStore;
     this.navigator = navigator;
+    this.workspaceState = workspaceState || new WorkspaceState({ config, eventStore });
     this.sessionsDir = path.join(config.stateDir, "sessions");
     this.submissionsDir = path.join(config.stateDir, "submissions");
     this.sessions = new Map();
     this.active = new Map();
+    this.reserved = new Set();
   }
 
   sessionDir(sessionKey) {
@@ -92,15 +106,16 @@ class SessionManager {
           submission.status = "failed";
           submission.error = "runtime restarted while the submission was active";
           submission.completedAt = nowIso();
+          await this.finishWorkspaceTurn(record, submission);
           await this.persistSubmission(submission);
-          await this.eventStore.append("submission.failed", {
+          await this.eventStore.append(`submission.${submission.status}`, {
             sessionKey: record.sessionKey,
             submissionId,
-            error: submission.error,
+            error: submission.error || null,
           });
         }
-        record.status = "attention_required";
-        record.lastError = "runtime restarted while a submission was active";
+        record.status = submission?.status === "completed" ? "ready" : "attention_required";
+        record.lastError = submission?.status === "completed" ? null : "runtime restarted while a submission was active";
         record.activeSubmissionId = null;
         record.lastSubmissionId = submissionId;
         record.updatedAt = nowIso();
@@ -146,9 +161,11 @@ class SessionManager {
     const key = String(sessionKey || "").trim();
     if (!key) throw new Error("sessionKey required");
     const normalizedDriver = normalizeDriver(driver);
-    const resolvedWorkspace = path.resolve(String(workspace || "").trim());
+    const requestedWorkspace = path.resolve(String(workspace || "").trim());
+    const resolvedWorkspace = await fs.realpath(requestedWorkspace).catch(() => requestedWorkspace);
     const stat = await fs.stat(resolvedWorkspace).catch(() => null);
     if (!stat?.isDirectory()) throw new Error(`workspace is not a directory: ${resolvedWorkspace}`);
+    await this.workspaceState.ensure(resolvedWorkspace);
 
     const existing = this.sessions.get(key);
     if (existing && existing.status !== "closed") return publicSession(existing);
@@ -299,16 +316,17 @@ class SessionManager {
     return publicSession(session);
   }
 
-  async submit(sessionKey, { message, idempotencyKey = null, timeoutMs = null } = {}) {
+  async submit(sessionKey, { message, inputs = [], idempotencyKey = null, timeoutMs = null } = {}) {
     const session = this.rawSession(sessionKey);
     const prompt = String(message || "").trim();
-    if (!prompt) throw new Error("message required");
+    const inputDescriptors = Array.isArray(inputs) ? inputs : [];
+    if (!prompt && inputDescriptors.length === 0) throw new Error("message or input file required");
     const idempotency = String(idempotencyKey || "").trim();
     if (idempotency && session.idempotency?.[idempotency]) {
       const prior = await this.getSubmission(session.idempotency[idempotency]);
       if (prior) return prior;
     }
-    if (this.active.has(session.sessionKey) || session.activeSubmissionId) {
+    if (this.reserved.has(session.sessionKey) || this.active.has(session.sessionKey) || session.activeSubmissionId) {
       const err = new Error("session already has an active submission");
       err.code = "SESSION_BUSY";
       throw err;
@@ -318,45 +336,80 @@ class SessionManager {
       err.code = session.status === "auth_required" ? "AUTH_REQUIRED" : "SESSION_NOT_READY";
       throw err;
     }
-    if (!await this.tmux.has(session.tmuxSessionName)) {
-      session.status = "stopped";
-      await this.persistSession(session);
-      throw new Error("terminal session is not running; restart it before submitting");
-    }
+    this.reserved.add(session.sessionKey);
+    let activeRuntime = null;
+    let scheduled = false;
+    try {
+      if (!await this.tmux.has(session.tmuxSessionName)) {
+        session.status = "stopped";
+        await this.persistSession(session);
+        throw new Error("terminal session is not running; restart it before submitting");
+      }
 
-    const submissionId = createId("sub");
-    const marker = `<cli-runtime-submission id="${submissionId}"/>`;
-    const submittedPrompt = `${normalizePrompt(prompt)} ${marker}`;
-    const submission = {
-      version: 1,
-      submissionId,
-      sessionKey: session.sessionKey,
-      status: "accepted",
-      marker,
-      timeoutMs: Number(timeoutMs) > 0 ? Number(timeoutMs) : this.config.submissionTimeoutMs,
-      reply: null,
-      error: null,
-      progress: null,
-      acceptedAt: nowIso(),
-      startedAt: null,
-      completedAt: null,
-    };
-    const controller = new AbortController();
-    const activeRuntime = { submission, controller, interrupted: false };
-    this.active.set(session.sessionKey, activeRuntime);
-    session.status = "running";
-    session.activeSubmissionId = submissionId;
-    session.lastError = null;
-    if (idempotency) {
-      session.idempotency = { ...(session.idempotency || {}), [idempotency]: submissionId };
-      const keys = Object.keys(session.idempotency);
-      for (const key of keys.slice(0, Math.max(0, keys.length - 100))) delete session.idempotency[key];
+      const submissionId = createId("sub");
+      const marker = `<cli-runtime-submission id="${submissionId}"/>`;
+      const acceptedAt = nowIso();
+      const prepared = await this.workspaceState.startTurn({
+        workspace: session.workspace,
+        sessionKey: session.sessionKey,
+        submissionId,
+        driver: session.driver,
+        message: prompt,
+        inputs: inputDescriptors,
+        acceptedAt,
+      });
+      const userPrompt = prompt || "Review the attached input file(s) and respond appropriately.";
+      const submittedPrompt = `${normalizePrompt(`${userPrompt}${prepared.promptContext}`)} ${marker}`;
+      const submission = {
+        version: 1,
+        submissionId,
+        sessionKey: session.sessionKey,
+        status: "accepted",
+        driver: session.driver,
+        workspace: session.workspace,
+        message: prompt,
+        inputs: prepared.inputs,
+        outputBaseline: prepared.outputBaseline,
+        outputs: [],
+        outputError: null,
+        marker,
+        timeoutMs: Number(timeoutMs) > 0 ? Number(timeoutMs) : this.config.submissionTimeoutMs,
+        reply: null,
+        error: null,
+        progress: null,
+        acceptedAt,
+        startedAt: null,
+        completedAt: null,
+      };
+      const controller = new AbortController();
+      activeRuntime = { submission, controller, interrupted: false };
+      this.active.set(session.sessionKey, activeRuntime);
+      session.status = "running";
+      session.activeSubmissionId = submissionId;
+      session.lastError = null;
+      if (idempotency) {
+        session.idempotency = { ...(session.idempotency || {}), [idempotency]: submissionId };
+        const keys = Object.keys(session.idempotency);
+        for (const key of keys.slice(0, Math.max(0, keys.length - 100))) delete session.idempotency[key];
+      }
+      await this.persistSubmission(submission);
+      await this.persistSession(session);
+      await this.eventStore.append("submission.accepted", { sessionKey: session.sessionKey, submissionId });
+      setImmediate(() => this.executeSubmission(session, submission, submittedPrompt, activeRuntime).catch(() => {}));
+      scheduled = true;
+      return publicSubmission(submission);
+    } catch (err) {
+      if (activeRuntime && !scheduled && this.active.get(session.sessionKey) === activeRuntime) {
+        this.active.delete(session.sessionKey);
+        session.status = "ready";
+        session.activeSubmissionId = null;
+        session.lastError = tailText(err.message || String(err), 20_000);
+        await this.persistSession(session).catch(() => {});
+      }
+      throw err;
+    } finally {
+      this.reserved.delete(session.sessionKey);
     }
-    await this.persistSubmission(submission);
-    await this.persistSession(session);
-    await this.eventStore.append("submission.accepted", { sessionKey: session.sessionKey, submissionId });
-    setImmediate(() => this.executeSubmission(session, submission, submittedPrompt, activeRuntime).catch(() => {}));
-    return publicSubmission(submission);
   }
 
   async monitorTerminal(session, signal) {
@@ -372,7 +425,7 @@ class SessionManager {
         err.code = "AUTH_REQUIRED";
         throw err;
       }
-      await sleep(400);
+      await sleepWithSignal(400, signal);
     }
     return null;
   }
@@ -408,6 +461,14 @@ class SessionManager {
     await fs.writeFile(promptPath, submittedPrompt, { encoding: "utf8", mode: 0o600 });
     submission.status = "running";
     submission.startedAt = nowIso();
+    await this.updateWorkspaceTurn({
+      workspace: session.workspace,
+      sessionKey: session.sessionKey,
+      submissionId: submission.submissionId,
+      progress: submission.progress,
+      status: "running",
+      startedAt: submission.startedAt,
+    });
     await this.persistSubmission(submission);
     await this.eventStore.append("submission.started", {
       sessionKey: session.sessionKey,
@@ -419,8 +480,10 @@ class SessionManager {
     const observed = { bound: false };
     const forwardInterrupt = () => watchController.abort();
     controller.signal.addEventListener("abort", forwardInterrupt, { once: true });
+    let artifactPromise = null;
+    let terminalPromise = null;
     try {
-      const artifactPromise = watchArtifacts({
+      artifactPromise = watchArtifacts({
         driver: session.driver,
         rootDir,
         baseline,
@@ -428,26 +491,42 @@ class SessionManager {
         timeoutMs: submission.timeoutMs,
         pollMs: this.config.artifactPollMs,
         signal: watchController.signal,
-        onBound: ({ artifactPath, providerSessionId }) => {
+        onBound: async ({ artifactPath, providerSessionId }) => {
           observed.bound = true;
           submission.progress = publicProgress({
             ...(submission.progress || {}),
             artifactPath,
             providerSessionId,
           });
+          await this.updateWorkspaceTurn({
+            workspace: session.workspace,
+            sessionKey: session.sessionKey,
+            submissionId: submission.submissionId,
+            progress: submission.progress,
+            status: "running",
+            startedAt: submission.startedAt,
+          });
         },
         onProgress: async (progress) => {
           submission.progress = publicProgress(progress);
+          await this.updateWorkspaceTurn({
+            workspace: session.workspace,
+            sessionKey: session.sessionKey,
+            submissionId: submission.submissionId,
+            progress: submission.progress,
+            status: "running",
+            startedAt: submission.startedAt,
+          });
           await this.persistSubmission(submission);
           await this.eventStore.append("submission.progress", {
             sessionKey: session.sessionKey,
             submissionId: submission.submissionId,
-            progress: publicProgress(progress),
+            progress: submission.progress,
           });
         },
       });
       artifactPromise.catch(() => {});
-      const terminalPromise = this.monitorTerminal(session, monitorController.signal);
+      terminalPromise = this.monitorTerminal(session, monitorController.signal);
       terminalPromise.catch(() => {});
       await this.tmux.sendKey(session.tmuxSessionName, "C-u");
       await this.tmux.pasteFile(
@@ -460,6 +539,7 @@ class SessionManager {
       const result = await Promise.race([artifactPromise, terminalPromise]);
       monitorController.abort();
       watchController.abort();
+      await Promise.allSettled([artifactPromise, terminalPromise]);
       if (!result?.terminal) throw new Error("terminal monitor ended before driver completion");
       submission.progress = publicProgress(result);
       submission.reply = tailText(result.reply || "", 200_000);
@@ -473,6 +553,7 @@ class SessionManager {
       session.activeSubmissionId = null;
       session.lastSubmissionId = submission.submissionId;
       session.startMode = session.providerSessionId ? "resume" : "fresh";
+      await this.finishWorkspaceTurn(session, submission);
       await this.persistSubmission(submission);
       await this.persistSession(session);
       await this.eventStore.append(`submission.${submission.status}`, {
@@ -484,6 +565,7 @@ class SessionManager {
     } catch (err) {
       monitorController.abort();
       watchController.abort();
+      await Promise.allSettled([artifactPromise, terminalPromise].filter(Boolean));
       submission.status = activeRuntime.interrupted ? "interrupted" : "failed";
       submission.error = tailText(err.message || String(err), 20_000);
       submission.completedAt = nowIso();
@@ -493,6 +575,7 @@ class SessionManager {
         session.activeSubmissionId = null;
         session.lastSubmissionId = submission.submissionId;
       }
+      await this.finishWorkspaceTurn(session, submission);
       await this.persistSubmission(submission);
       if (session.status !== "closing" && session.status !== "closed") await this.persistSession(session);
       await this.eventStore.append(`submission.${submission.status}`, {
@@ -508,6 +591,75 @@ class SessionManager {
 
   async getSubmission(submissionId) {
     return publicSubmission(await readJson(this.submissionPath(submissionId), null));
+  }
+
+  async finishWorkspaceTurn(session, submission) {
+    try {
+      const finished = await this.workspaceState.finishTurn({
+        workspace: session.workspace,
+        sessionKey: session.sessionKey,
+        submission,
+        driver: session.driver,
+        progress: submission.progress,
+      });
+      if (finished.reused) {
+        const record = finished.record;
+        submission.status = record.status;
+        submission.reply = record.assistant?.text || null;
+        submission.error = record.failure || null;
+        submission.completedAt = record.completedAt;
+        submission.progress = {
+          providerSessionId: record.providerSessionId || null,
+          reasoning: Array.isArray(record.reasoning) ? record.reasoning : [],
+          toolUses: (Array.isArray(record.tools) ? record.tools : []).map((tool) => ({
+            id: tool.callId,
+            tool: tool.tool,
+            arguments: tool.arguments,
+            success: tool.success,
+            error: tool.error,
+          })),
+          lastAssistantMessage: record.assistant?.text || "",
+        };
+      }
+      submission.outputs = finished.outputs;
+      submission.outputError = finished.outputError;
+      return finished;
+    } catch (err) {
+      submission.outputError = tailText(err.message || String(err), 4000);
+      await this.eventStore.append("workspace.turn_state_failed", {
+        sessionKey: session.sessionKey,
+        submissionId: submission.submissionId,
+        error: submission.outputError,
+      }).catch(() => {});
+      return null;
+    }
+  }
+
+  async updateWorkspaceTurn(options) {
+    try {
+      return await this.workspaceState.updateTurn(options);
+    } catch (err) {
+      await this.eventStore.append("workspace.turn_state_failed", {
+        sessionKey: options.sessionKey || null,
+        submissionId: options.submissionId,
+        error: tailText(err.message || String(err), 4000),
+      }).catch(() => {});
+      return null;
+    }
+  }
+
+  async acknowledgeOutputs(submissionId) {
+    const submission = await readJson(this.submissionPath(submissionId), null);
+    if (!submission) return null;
+    const workspace = submission.workspace || this.rawSession(submission.sessionKey).workspace;
+    submission.outputs = await this.workspaceState.acknowledgeOutputs({
+      workspace,
+      sessionKey: submission.sessionKey,
+      submissionId,
+      outputs: submission.outputs,
+    });
+    await this.persistSubmission(submission);
+    return publicSubmission(submission);
   }
 
   async output(sessionKey) {
@@ -540,7 +692,9 @@ class SessionManager {
 
   async restart(sessionKey) {
     const session = this.rawSession(sessionKey);
-    if (this.active.has(session.sessionKey)) throw new Error("cannot restart a session with an active submission");
+    if (this.reserved.has(session.sessionKey) || this.active.has(session.sessionKey)) {
+      throw new Error("cannot restart a session with an active submission");
+    }
     session.status = "starting";
     session.startMode = session.providerSessionId ? "resume" : "fresh";
     session.lastError = null;
@@ -551,6 +705,7 @@ class SessionManager {
 
   async close(sessionKey) {
     const session = this.rawSession(sessionKey);
+    if (this.reserved.has(session.sessionKey)) throw new Error("cannot close a session while a submission is being prepared");
     const active = this.active.get(session.sessionKey);
     session.status = "closing";
     await this.persistSession(session);

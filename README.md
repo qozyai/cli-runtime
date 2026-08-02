@@ -17,6 +17,7 @@ execution context with a session key.
 - caller session keys are durable; provider session IDs remain internal
 - every event has a durable sequence number for replay
 - the API listens on a local Unix socket by default
+- normalized project history and file exchange stay under `<workspace>/.qozyai`
 
 ## Start
 
@@ -65,6 +66,7 @@ POST   /v1/sessions/:sessionKey/interrupt
 POST   /v1/sessions/:sessionKey/restart
 GET    /v1/sessions/:sessionKey/attach
 GET    /v1/submissions/:submissionId
+POST   /v1/submissions/:submissionId/outputs/ack
 GET    /v1/events?after=<sequence>&sessionKey=<optional>&waitMs=<optional>
 GET    /v1/auth/:driver/status
 POST   /v1/auth/:driver/start
@@ -74,8 +76,32 @@ POST   /v1/auth/:driver/submit
 `session.submit` returns immediately. Consumers follow its `submissionId`
 through the submission endpoint or durable event stream.
 
-Submission progress includes the latest assistant message and bounded tool
-records (`tool`, `arguments`, `success`, and an error only on failure).
+Submission progress is deterministic. It includes a bounded status summary,
+the latest three plaintext reasoning chunks exposed by the provider artifact,
+and the latest three tool records (`callId`, `tool`, bounded `arguments`,
+`success`, and an error only on failure). Encrypted or hidden reasoning and
+successful tool output are not retained.
+
+Local callers attach files by passing `inputs` to a submission:
+
+```json
+{
+  "message": "Review the recording",
+  "inputs": [
+    {
+      "sourcePath": "/shared/upload/recording.ogg",
+      "name": "recording.ogg",
+      "mimeType": "audio/ogg",
+      "transcript": "optional caller-provided transcript"
+    }
+  ]
+}
+```
+
+Inputs must be direct regular files reachable by the runtime. Completed
+submissions return archived output descriptors. A caller acknowledges outputs
+only after successful delivery; acknowledgement clears the live outbox copy but
+keeps the bounded archive.
 
 ## Authentication
 
@@ -108,12 +134,17 @@ cli-runtime telegram
 ```
 
 Telegram is an adapter over the same Unix-socket API. Core session behavior
-does not depend on Telegram. Optional settings are:
+does not depend on Telegram. Text, documents, photos, audio, voice, and video
+are accepted. While a turn runs, Telegram edits one explicit status message at
+most every 30 seconds and sends final text/files separately. Optional settings
+are:
 
 ```bash
 export CLI_RUNTIME_TELEGRAM_DRIVER=claude
 export CLI_RUNTIME_TELEGRAM_WORKSPACE="$HOME/project"
 export CLI_RUNTIME_TELEGRAM_ALLOWED_CHATS="12345,67890"
+export CLI_RUNTIME_TELEGRAM_STATUS_EDIT_MS=30000
+export CLI_RUNTIME_TELEGRAM_MAX_FILE_BYTES=20971520
 ```
 
 Supported commands are `/start`, `/driver claude`, `/driver codex`, `/status`,
@@ -135,3 +166,8 @@ an explicit action schema. The service may return only `wait`, `press_key`,
 `submit_text`, `auth_required`, or `fail`; keys and submitted text are validated
 before they reach tmux. QozyAI can provide this endpoint without moving its
 conversation or lane policy into this module.
+
+## Workspace State
+
+See [`docs/turn-state.md`](docs/turn-state.md) for the deterministic history,
+file lifecycle, retention, and deferred interpreted-observer contract.

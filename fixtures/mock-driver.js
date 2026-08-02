@@ -49,7 +49,7 @@ function complete(line) {
     append({
       type: "assistant",
       sessionId,
-      message: { role: "assistant", content: [{ type: "thinking", thinking: "" }], stop_reason: "end_turn" },
+      message: { role: "assistant", content: [{ type: "thinking", thinking: `Inspecting ${clean}` }], stop_reason: "end_turn" },
     });
     if (clean.includes("TOOL")) {
       append({
@@ -70,6 +70,7 @@ function complete(line) {
     });
   } else {
     append({ type: "event_msg", payload: { type: "user_message", message: line } });
+    append({ type: "event_msg", payload: { type: "agent_reasoning", text: `Inspecting ${clean}` } });
     append({ type: "event_msg", payload: { type: "agent_message", message: `Working on ${clean}` } });
     if (clean.includes("TOOL")) {
       append({ type: "response_item", payload: { type: "custom_tool_call", call_id: "call-mock", name: "exec", input: "true" } });

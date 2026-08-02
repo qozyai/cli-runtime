@@ -12,6 +12,20 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function sleepWithSignal(ms, signal) {
+  if (!signal) return sleep(ms);
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+
 function safeId(value, length = 16) {
   return crypto.createHash("sha256").update(String(value || "")).digest("hex").slice(0, length);
 }
@@ -86,6 +100,7 @@ module.exports = {
   sendJson,
   shellQuote,
   sleep,
+  sleepWithSignal,
   tailText,
   writeAtomic,
 };

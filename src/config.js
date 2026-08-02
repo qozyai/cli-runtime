@@ -26,6 +26,12 @@ function loadConfig(env = process.env) {
     startupTimeoutMs: positiveNumber(env.CLI_RUNTIME_STARTUP_TIMEOUT_MS, 30_000),
     submissionTimeoutMs: positiveNumber(env.CLI_RUNTIME_SUBMISSION_TIMEOUT_MS, 30 * 60_000),
     artifactPollMs: positiveNumber(env.CLI_RUNTIME_ARTIFACT_POLL_MS, 150),
+    workspaceMaxInputFiles: positiveNumber(env.CLI_RUNTIME_MAX_INPUT_FILES, 20),
+    workspaceMaxInputFileBytes: positiveNumber(env.CLI_RUNTIME_MAX_INPUT_FILE_BYTES, 50 * 1024 * 1024),
+    workspaceMaxInputTotalBytes: positiveNumber(env.CLI_RUNTIME_MAX_INPUT_TOTAL_BYTES, 100 * 1024 * 1024),
+    workspaceMaxOutputFiles: positiveNumber(env.CLI_RUNTIME_MAX_OUTPUT_FILES, 20),
+    workspaceMaxOutputFileBytes: positiveNumber(env.CLI_RUNTIME_MAX_OUTPUT_FILE_BYTES, 100 * 1024 * 1024),
+    workspaceMaxOutputTotalBytes: positiveNumber(env.CLI_RUNTIME_MAX_OUTPUT_TOTAL_BYTES, 200 * 1024 * 1024),
     navigator: {
       url: String(env.CLI_RUNTIME_NAVIGATOR_URL || "").trim(),
       apiKey: String(env.CLI_RUNTIME_NAVIGATOR_API_KEY || "").trim(),
@@ -52,6 +58,8 @@ function loadConfig(env = process.env) {
       token: String(env.TELEGRAM_BOT_TOKEN || "").trim(),
       defaultDriver: String(env.CLI_RUNTIME_TELEGRAM_DRIVER || "claude").trim().toLowerCase(),
       workspace: path.resolve(env.CLI_RUNTIME_TELEGRAM_WORKSPACE || process.cwd()),
+      statusEditIntervalMs: positiveNumber(env.CLI_RUNTIME_TELEGRAM_STATUS_EDIT_MS, 30_000),
+      maxFileBytes: positiveNumber(env.CLI_RUNTIME_TELEGRAM_MAX_FILE_BYTES, 20 * 1024 * 1024),
       allowedChatIds: new Set(String(env.CLI_RUNTIME_TELEGRAM_ALLOWED_CHATS || "")
         .split(",")
         .map((item) => item.trim())
