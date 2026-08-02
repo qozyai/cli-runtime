@@ -1,0 +1,2 @@
+{"type":"user","sessionId":"00000000-0000-4000-8000-000000000001","message":{"role":"user","content":"fixture <cli-runtime-submission id=\"fixture-claude\"/>"}}
+{"type":"assistant","sessionId":"00000000-0000-4000-8000-000000000001","isApiErrorMessage":true,"apiErrorStatus":529,"error":"overloaded_error","requestId":"req_fixture","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"The service is temporarily overloaded. Please try again."}],"stop_reason":"stop_sequence"}}

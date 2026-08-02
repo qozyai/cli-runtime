@@ -2,9 +2,11 @@
 
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
-const { shellQuote } = require("./util");
+const { isolatedProcessEnv, shellQuote, sleep } = require("./util");
 
 const execFileAsync = promisify(execFile);
+const EXIT_STATUS_WAIT_MS = 250;
+const EXIT_STATUS_POLL_MS = 25;
 
 class Tmux {
   constructor(socketName = "qozyai-cli-runtime") {
@@ -38,13 +40,35 @@ class Tmux {
   }
 
   async startCommand(sessionName, command, args, env = {}) {
-    const envParts = Object.entries(env)
-      .filter(([key, value]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) && value !== undefined && value !== null)
+    const envParts = Object.entries(isolatedProcessEnv({ TERM: "screen-256color", COLORTERM: "truecolor", ...env }))
       .map(([key, value]) => `${key}=${shellQuote(value)}`);
-    const invocation = ["env", ...envParts, shellQuote(command), ...args.map(shellQuote)].join(" ");
-    const shellLine = `${invocation}; rc=$?; printf '\\n[cli-runtime driver exited: %s]\\n' "$rc"`;
-    await this.sendLiteral(sessionName, shellLine);
-    await this.sendKey(sessionName, "Enter");
+    const invocation = [
+      "exec", "env", "-i", ...envParts,
+      shellQuote(command), ...args.map(shellQuote),
+    ].join(" ");
+    await this.run(["set-option", "-p", "-t", sessionName, "remain-on-exit", "on"]);
+    await this.run(["respawn-pane", "-k", "-t", sessionName, invocation]);
+  }
+
+  async driverState(sessionName) {
+    let paneDead;
+    let value;
+    const deadline = Date.now() + EXIT_STATUS_WAIT_MS;
+    while (true) {
+      const output = await this.run([
+        "display-message", "-p", "-t", sessionName,
+        "#{pane_dead}\t#{pane_dead_status}",
+      ]);
+      [paneDead, value = ""] = output.trimEnd().split("\t");
+      if (paneDead !== "1" || /^-?\d+$/.test(value)) break;
+      if (Date.now() >= deadline) break;
+      await sleep(EXIT_STATUS_POLL_MS);
+    }
+    return {
+      paneDead: paneDead === "1",
+      state: paneDead === "1" ? "exited" : "running",
+      exitCode: paneDead === "1" && /^-?\d+$/.test(value) ? Number(value) : null,
+    };
   }
 
   async capture(sessionName, lines = 120) {

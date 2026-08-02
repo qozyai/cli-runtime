@@ -9,7 +9,8 @@ const { EventStore } = require("../src/event-store");
 const { Tmux } = require("../src/tmux");
 const { SessionManager } = require("../src/session-manager");
 const { createServer } = require("../src/server");
-const { TelegramAdapter, chunks } = require("../src/telegram");
+const { TELEGRAM_DOCUMENT_LIMIT, TelegramAdapter, chunks } = require("../src/telegram");
+const { readJson } = require("../src/util");
 
 test("Telegram remains a thin adapter over the runtime API", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-"));
@@ -94,6 +95,10 @@ test("Telegram stages audio and edits one explicit progress message", async (t) 
   };
   const adapter = new TelegramAdapter({
     config,
+    openaiHelper: {
+      enabled: true,
+      transcribe: async () => "Voice sample transcript.",
+    },
     fetchImpl: async (url, options = {}) => {
       const method = url.split("/").pop();
       calls.push({ method, body: options.body });
@@ -115,6 +120,7 @@ test("Telegram stages audio and edits one explicit progress message", async (t) 
   const inputs = await adapter.downloadInputs(message);
   assert.equal(inputs.length, 1);
   assert.equal(inputs[0].name, "voice-7.ogg");
+  assert.equal(inputs[0].transcript, "Voice sample transcript.");
   assert.equal(await fs.readFile(inputs[0].sourcePath, "utf8"), "voice-bytes");
 
   let reads = 0;
@@ -174,4 +180,260 @@ test("Telegram does not redeliver outputs that were already acknowledged", async
   await adapter.handle({ chat: { id: 42 }, message_id: 9, text: "retry" });
   assert.equal(fileDeliveries, 0);
   assert.equal(runtimeCalls.some((call) => call.requestPath.includes("/outputs/ack")), false);
+});
+
+test("Telegram persists accepted updates before advancing offset and replays queued work", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-queue-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const config = {
+    stateDir: root,
+    socketPath: path.join(root, "runtime.sock"),
+    telegram: { token: "token", defaultDriver: "claude", workspace: root, allowedChatIds: new Set(["42"]) },
+  };
+  const first = new TelegramAdapter({ config, fetchImpl: async () => { throw new Error("unused"); } });
+  await first.init();
+  first.dispatch = () => {};
+  const update = { update_id: 77, message: { chat: { id: 42 }, message_id: 9, text: "durable" } };
+  await first.acceptUpdate(update);
+  assert.deepEqual(await readJson(path.join(root, "telegram", "offset.json"), null), { version: 1, offset: 78 });
+  assert.equal((await readJson(path.join(root, "telegram", "queue", "77.json"), null)).message.text, "durable");
+
+  const handled = [];
+  const second = new TelegramAdapter({ config, fetchImpl: async () => { throw new Error("unused"); } });
+  second.handle = async (message) => { handled.push(message.message_id); };
+  await second.init();
+  const deadline = Date.now() + 1000;
+  while (handled.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(handled, [9]);
+  while (await fs.access(path.join(root, "telegram", "queue", "77.json")).then(() => true, () => false)) {
+    if (Date.now() >= deadline) break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  await assert.rejects(() => fs.access(path.join(root, "telegram", "queue", "77.json")));
+});
+
+test("Telegram stop bypasses a blocked ordinary route", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-control-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const adapter = new TelegramAdapter({
+    config: {
+      stateDir: root,
+      socketPath: path.join(root, "runtime.sock"),
+      telegram: { token: "token", defaultDriver: "claude", workspace: root, allowedChatIds: new Set() },
+    },
+    fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true, result: { message_id: 1 } }) }),
+  });
+  await adapter.init();
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const calls = [];
+  adapter.handle = async (message) => {
+    if (message.text === "slow") await gate;
+    else return TelegramAdapter.prototype.handle.call(adapter, message);
+  };
+  adapter.runtime = async (method, requestPath) => {
+    calls.push({ method, requestPath });
+    if (method === "GET") return { session: { status: "running", activeSubmissionId: "sub-active" } };
+    return { interrupted: true };
+  };
+  adapter.send = async () => {};
+  adapter.dispatch({ update_id: 1, message: { chat: { id: 42 }, message_id: 1, text: "slow" } });
+  adapter.dispatch({ update_id: 2, message: { chat: { id: 42 }, message_id: 2, text: "/status" } });
+  adapter.dispatch({ update_id: 3, message: { chat: { id: 42 }, message_id: 3, text: "/stop" } });
+  const deadline = Date.now() + 500;
+  while (calls.length < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.ok(calls.some((call) => call.method === "GET"));
+  assert.ok(calls.some((call) => call.requestPath.endsWith("/interrupt")));
+  release();
+});
+
+test("Telegram rejects oversized output before reading it and acknowledges successful siblings only", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-size-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const adapter = new TelegramAdapter({
+    config: {
+      stateDir: root,
+      socketPath: path.join(root, "runtime.sock"),
+      telegram: { token: "token", defaultDriver: "claude", workspace: root, allowedChatIds: new Set() },
+    },
+    fetchImpl: async () => { throw new Error("network should not be reached"); },
+  });
+  await adapter.init();
+  await assert.rejects(() => adapter.sendFile({ chat: { id: 1 } }, {
+    originalName: "huge.zip",
+    size: TELEGRAM_DOCUMENT_LIMIT + 1,
+    archivePath: path.join(root, "missing.zip"),
+  }), /50 MB/);
+});
+
+test("Telegram visibly reports transcription failure while submitting original audio", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-transcribe-fail-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, "voice.ogg");
+  await fs.writeFile(sourcePath, "voice");
+  const adapter = new TelegramAdapter({
+    config: {
+      stateDir: root,
+      socketPath: path.join(root, "runtime.sock"),
+      telegram: { token: "token", defaultDriver: "claude", workspace: root, allowedChatIds: new Set() },
+    },
+    fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true, result: { message_id: 1 } }) }),
+  });
+  await adapter.init();
+  const sent = [];
+  let submittedInputs = null;
+  adapter.send = async (_message, text) => { sent.push(text); };
+  adapter.typing = async () => {};
+  adapter.sendStatus = async () => ({ message_id: 1 });
+  adapter.ensureSession = async () => ({ status: "ready" });
+  adapter.downloadInputs = async () => [{
+    sourcePath,
+    name: "voice.ogg",
+    mimeType: "audio/ogg",
+    transcript: null,
+    transcriptionError: "Audio transcription failed: upstream timeout",
+    temporary: true,
+  }];
+  adapter.runtime = async (method, requestPath, body) => {
+    if (method === "POST" && requestPath.endsWith("/submissions")) {
+      submittedInputs = body.inputs;
+      return { submission: { submissionId: "sub-audio" } };
+    }
+    throw new Error(`unexpected ${method} ${requestPath}`);
+  };
+  adapter.waitSubmission = async () => ({ submissionId: "sub-audio", status: "completed", reply: "heard", outputs: [] });
+  await adapter.handle({ chat: { id: 42 }, message_id: 4, voice: { file_id: "voice", file_size: 5, mime_type: "audio/ogg" } });
+  assert.ok(sent.some((text) => /transcription failed/i.test(text)));
+  assert.equal(submittedInputs[0].name, "voice.ogg");
+  assert.equal(sent.at(-1), "heard");
+});
+
+test("Telegram does not report a user interruption as a model error", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-interrupt-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const adapter = new TelegramAdapter({
+    config: {
+      stateDir: root,
+      socketPath: path.join(root, "runtime.sock"),
+      telegram: { token: "token", defaultDriver: "claude", workspace: root, allowedChatIds: new Set() },
+    },
+    fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true, result: { message_id: 1 } }) }),
+  });
+  await adapter.init();
+  const sent = [];
+  adapter.send = async (_message, text) => { sent.push(text); };
+  adapter.typing = async () => {};
+  adapter.sendStatus = async () => ({ message_id: 1 });
+  adapter.ensureSession = async () => ({ status: "ready" });
+  adapter.downloadInputs = async () => [];
+  adapter.runtime = async (method, requestPath) => {
+    if (method === "POST" && requestPath.endsWith("/submissions")) {
+      return { submission: { submissionId: "sub-interrupted" } };
+    }
+    throw new Error(`unexpected ${method} ${requestPath}`);
+  };
+  adapter.waitSubmission = async () => ({
+    submissionId: "sub-interrupted",
+    status: "interrupted",
+    error: "submission interrupted",
+    outputs: [],
+  });
+
+  await adapter.handle({ chat: { id: 42 }, message_id: 5, text: "long task" });
+  assert.deepEqual(sent, []);
+});
+
+test("Telegram chat admission fails closed unless explicitly allowlisted", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-allowlist-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const config = {
+    stateDir: root,
+    telegram: { token: "token", defaultDriver: "claude", workspace: root, allowedChatIds: new Set() },
+  };
+  const adapter = new TelegramAdapter({ config });
+  const update = { message: { chat: { id: 42 }, message_id: 1, text: "hello" } };
+  assert.equal(adapter.acceptedMessage(update), false);
+  config.telegram.allowedChatIds.add("42");
+  assert.equal(adapter.acceptedMessage(update), true);
+  config.telegram.allowedChatIds = new Set(["*"]);
+  assert.equal(adapter.acceptedMessage(update), true);
+});
+
+test("Telegram chunks do not split Unicode surrogate pairs", () => {
+  const parts = chunks(`abc${"✅".repeat(10)}`, 4);
+  assert.equal(parts.join(""), `abc${"✅".repeat(10)}`);
+  assert.ok(parts.every((part) => !/[\ud800-\udbff]$|^[\udc00-\udfff]/.test(part)));
+});
+
+test("Telegram reset is an ordered route barrier after immediate interruption", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-reset-barrier-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const adapter = new TelegramAdapter({
+    config: {
+      stateDir: root,
+      socketPath: path.join(root, "runtime.sock"),
+      telegram: { token: "token", defaultDriver: "claude", workspace: root, allowedChatIds: new Set(["42"]) },
+    },
+    fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true, result: { message_id: 1 } }) }),
+  });
+  await adapter.init();
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const order = [];
+  adapter.handle = async (message) => {
+    if (message.text === "slow") {
+      await gate;
+      order.push("slow");
+      return;
+    }
+    order.push(message.text);
+  };
+  adapter.runtime = async (method, requestPath) => {
+    if (requestPath.endsWith("/interrupt")) {
+      order.push("interrupt");
+      return { interrupted: true };
+    }
+    if (method === "GET") return { session: { activeSubmissionId: null } };
+    if (method === "DELETE") {
+      order.push("reset");
+      return { ok: true };
+    }
+    throw new Error(`unexpected ${method} ${requestPath}`);
+  };
+  adapter.ensureSession = async () => ({ status: "ready" });
+  adapter.send = async () => {};
+  adapter.dispatch({ update_id: 1, message: { chat: { id: 42 }, message_id: 1, text: "slow" } });
+  adapter.dispatch({ update_id: 2, message: { chat: { id: 42 }, message_id: 2, text: "/reset" } });
+  adapter.dispatch({ update_id: 3, message: { chat: { id: 42 }, message_id: 3, text: "after" } });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual(order, ["interrupt"]);
+  release();
+  const deadline = Date.now() + 1000;
+  while (!order.includes("after") && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(order, ["interrupt", "slow", "reset", "after"]);
+});
+
+test("Telegram reports a terminal handler error and retires its queue record", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-visible-error-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const adapter = new TelegramAdapter({
+    config: {
+      stateDir: root,
+      telegram: { token: "token", defaultDriver: "claude", workspace: root, allowedChatIds: new Set(["42"]) },
+    },
+  });
+  await adapter.init();
+  const queuePath = path.join(root, "telegram", "queue", "10.json");
+  await fs.writeFile(queuePath, "{}");
+  const sent = [];
+  adapter.handle = async () => { throw new Error("runtime unavailable"); };
+  adapter.send = async (_message, text) => { sent.push(text); };
+  adapter.dispatch({ update_id: 10, message: { chat: { id: 42 }, message_id: 1, text: "hello" } }, queuePath);
+  const deadline = Date.now() + 1000;
+  while (await fs.access(queuePath).then(() => true, () => false)) {
+    if (Date.now() >= deadline) break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.deepEqual(sent, ["Runtime error: runtime unavailable"]);
+  await assert.rejects(() => fs.access(queuePath));
 });

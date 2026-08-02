@@ -5,7 +5,7 @@ const path = require("node:path");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const { authCommand, driverConfig, isReady, normalizeDriver, recentScreen } = require("./drivers");
-const { safeId, sleep, tailText } = require("./util");
+const { isolatedProcessEnv, safeId, sleep, tailText } = require("./util");
 
 const execFileAsync = promisify(execFile);
 
@@ -34,6 +34,20 @@ class AuthManager {
     this.eventStore = eventStore;
     this.navigator = navigator;
     this.authDir = path.join(config.stateDir, "auth");
+    this.statusCache = new Map();
+    this.startLocks = new Map();
+  }
+
+  async withStartLock(driver, operation) {
+    const previous = this.startLocks.get(driver) || Promise.resolve();
+    let release;
+    const current = new Promise((resolve) => { release = resolve; });
+    this.startLocks.set(driver, current);
+    await previous.catch(() => {});
+    try { return await operation(); } finally {
+      release();
+      if (this.startLocks.get(driver) === current) this.startLocks.delete(driver);
+    }
   }
 
   sessionName(driver) {
@@ -42,49 +56,61 @@ class AuthManager {
 
   async status(driverValue) {
     const driver = normalizeDriver(driverValue);
+    const cached = this.statusCache.get(driver);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
     const spec = authCommand(this.config, driver);
     try {
       const result = await execFileAsync(spec.command, spec.args, {
-        env: { ...process.env, ...spec.env },
+        env: isolatedProcessEnv(spec.env),
         encoding: "utf8",
         timeout: 15_000,
         maxBuffer: 1024 * 1024,
       });
       if (driver === "claude") {
         const parsed = JSON.parse(String(result.stdout || "{}").trim());
-        return {
+        const value = {
           driver,
+          state: parsed.loggedIn === true ? "authenticated" : "unauthenticated",
           authenticated: parsed.loggedIn === true,
           method: parsed.authMethod || null,
           email: parsed.email || null,
         };
+        if (value.authenticated) this.statusCache.set(driver, { value, expiresAt: Date.now() + 60_000 });
+        return value;
       }
       const codexStatusText = `${result.stdout || ""}\n${result.stderr || ""}`;
-      return {
+      const value = {
         driver,
+        state: /logged in/i.test(codexStatusText) ? "authenticated" : "unauthenticated",
         authenticated: /logged in/i.test(codexStatusText),
         method: /chatgpt/i.test(codexStatusText) ? "chatgpt" : null,
         email: null,
       };
+      if (value.authenticated) this.statusCache.set(driver, { value, expiresAt: Date.now() + 60_000 });
+      return value;
     } catch (err) {
       if (driver === "claude") {
         try {
           const parsed = JSON.parse(String(err.stdout || "{}").trim());
-          return {
-            driver,
-            authenticated: parsed.loggedIn === true,
-            method: parsed.authMethod === "none" ? null : parsed.authMethod || null,
-            email: parsed.email || null,
-          };
+          if (typeof parsed.loggedIn === "boolean") {
+            return {
+              driver,
+              state: parsed.loggedIn ? "authenticated" : "unauthenticated",
+              authenticated: parsed.loggedIn,
+              method: parsed.authMethod === "none" ? null : parsed.authMethod || null,
+              email: parsed.email || null,
+            };
+          }
         } catch {}
       }
       const expectedUnauthenticated = driver === "codex" && /not logged in/i.test(`${err.stdout || ""}\n${err.stderr || ""}`);
       return {
         driver,
-        authenticated: false,
+        state: expectedUnauthenticated ? "unauthenticated" : "unknown",
+        authenticated: expectedUnauthenticated ? false : null,
         method: null,
         email: null,
-        error: expectedUnauthenticated ? undefined : tailText(String(err.stderr || err.stdout || err.message || err).trim(), 3000),
+        error: expectedUnauthenticated ? null : tailText(String(err.stderr || err.stdout || err.message || err).trim(), 3000),
       };
     }
   }
@@ -114,12 +140,23 @@ class AuthManager {
 
   async start(driverValue, { force = false } = {}) {
     const driver = normalizeDriver(driverValue);
+    return this.withStartLock(driver, () => this.startLocked(driver, { force }));
+  }
+
+  async startLocked(driver, { force = false } = {}) {
     const existing = await this.status(driver);
     if (existing.authenticated && !force) return { ...existing, phase: "completed" };
     const selected = driverConfig(this.config, driver);
     const sessionName = this.sessionName(driver);
     const workspace = path.join(this.authDir, driver);
     await fs.mkdir(workspace, { recursive: true });
+    if (!force && await this.tmux.has(sessionName)) {
+      const current = this.parseAuthPrompt(driver, await this.authScreen(driver));
+      const processState = await this.tmux.driverState(sessionName).catch(() => ({ paneDead: true }));
+      if (!processState.paneDead && ["starting", "awaiting_code", "awaiting_browser"].includes(current.phase)) {
+        return { driver, authenticated: false, state: "unauthenticated", ...current, attachCommand: this.tmux.attachCommand(sessionName) };
+      }
+    }
     await this.tmux.kill(sessionName);
     await this.tmux.createShell(sessionName, workspace);
     const args = driver === "claude" ? [] : ["login", "--device-auth"];
@@ -134,6 +171,15 @@ class AuthManager {
     let nextNavigationAt = Date.now() + 2000;
     let navigationAttempt = 0;
     while (Date.now() < deadline) {
+      const processState = await this.tmux.driverState(sessionName).catch((err) => ({ paneDead: true, error: err.message }));
+      if (processState.paneDead) {
+        last = {
+          ...last,
+          phase: "failed",
+          error: processState.error || `authentication process exited (${processState.exitCode ?? "unknown"})`,
+        };
+        break;
+      }
       const screen = await this.authScreen(driver);
       last = this.parseAuthPrompt(driver, screen);
       if (last.phase !== "starting") break;
@@ -208,6 +254,7 @@ class AuthManager {
     }
     const status = await this.status(driver);
     if (status.authenticated) last.phase = "completed";
+    if (status.authenticated) this.statusCache.set(driver, { value: status, expiresAt: Date.now() + 60_000 });
     await this.eventStore.append(`auth.${last.phase}`, { driver });
     return {
       ...status,

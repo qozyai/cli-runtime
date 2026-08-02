@@ -11,18 +11,30 @@ const { createServer } = require("./server");
 const { request } = require("./client");
 const { TelegramAdapter } = require("./telegram");
 const { Navigator } = require("./navigator");
+const { OpenAIHelper } = require("./openai-helper");
+const { acquireRuntimeLock } = require("./runtime-lock");
 const { sleep } = require("./util");
+const fs = require("node:fs/promises");
+const path = require("node:path");
+const { replayArtifact } = require("./artifacts");
 
 async function createRuntime(config = loadConfig()) {
-  const eventStore = new EventStore(config.stateDir);
-  await eventStore.init();
-  const tmux = new Tmux(config.tmuxSocketName);
-  const navigator = new Navigator({ config, eventStore });
-  const sessions = new SessionManager({ config, tmux, eventStore, navigator });
-  await sessions.init();
-  const auth = new AuthManager({ config, tmux, eventStore, navigator });
-  const server = createServer({ config, sessions, auth, eventStore });
-  return { config, eventStore, tmux, navigator, sessions, auth, server };
+  const ownershipLock = await acquireRuntimeLock(config.stateDir);
+  try {
+    const eventStore = new EventStore(config.stateDir);
+    await eventStore.init();
+    const tmux = new Tmux(config.tmuxSocketName);
+    const openaiHelper = new OpenAIHelper({ config });
+    const navigator = new Navigator({ config, eventStore, openaiHelper });
+    const sessions = new SessionManager({ config, tmux, eventStore, navigator });
+    await sessions.init();
+    const auth = new AuthManager({ config, tmux, eventStore, navigator });
+    const server = createServer({ config, sessions, auth, eventStore, ownershipLock });
+    return { config, eventStore, tmux, openaiHelper, navigator, sessions, auth, server };
+  } catch (err) {
+    await ownershipLock.release();
+    throw err;
+  }
 }
 
 function option(args, name) {
@@ -32,6 +44,29 @@ function option(args, name) {
 
 function print(value) {
   process.stdout.write(`${typeof value === "string" ? value : JSON.stringify(value, null, 2)}\n`);
+}
+
+function parseSendArguments(rest) {
+  const sessionKey = rest[0];
+  const separator = rest.indexOf("--", 1);
+  const optionArgs = separator >= 0 ? rest.slice(1, separator) : rest.slice(1);
+  const messageParts = separator >= 0 ? rest.slice(separator + 1) : [];
+  if (separator < 0) {
+    for (let index = 0; index < optionArgs.length; index += 1) {
+      if (optionArgs[index] === "--wait") continue;
+      if (optionArgs[index] === "--idempotency") {
+        index += 1;
+        continue;
+      }
+      messageParts.push(optionArgs[index]);
+    }
+  }
+  return {
+    sessionKey,
+    wait: optionArgs.includes("--wait"),
+    idempotencyKey: option(optionArgs, "--idempotency"),
+    message: messageParts.join(" ").trim(),
+  };
 }
 
 async function waitForSubmission(config, submissionId) {
@@ -59,23 +94,12 @@ async function runClient(config, args) {
     return;
   }
   if (area === "session" && action === "send") {
-    const sessionKey = rest[0];
-    const wait = rest.includes("--wait");
-    const messageParts = [];
-    for (let index = 1; index < rest.length; index += 1) {
-      if (rest[index] === "--wait") continue;
-      if (rest[index] === "--idempotency") {
-        index += 1;
-        continue;
-      }
-      messageParts.push(rest[index]);
-    }
-    const message = messageParts.join(" ").trim();
-    const accepted = await request(config.socketPath, "POST", `/v1/sessions/${encodeURIComponent(sessionKey)}/submissions`, {
-      message,
-      idempotencyKey: option(rest, "--idempotency"),
+    const parsed = parseSendArguments(rest);
+    const accepted = await request(config.socketPath, "POST", `/v1/sessions/${encodeURIComponent(parsed.sessionKey)}/submissions`, {
+      message: parsed.message,
+      idempotencyKey: parsed.idempotencyKey,
     });
-    if (!wait) print(accepted);
+    if (!parsed.wait) print(accepted);
     else print(await waitForSubmission(config, accepted.submission.submissionId));
     return;
   }
@@ -109,26 +133,39 @@ async function runClient(config, args) {
     print(await request(config.socketPath, "GET", `/v1/events?${query}`));
     return;
   }
+  if (area === "artifact" && action === "replay") {
+    const [driver, marker, filePath] = rest;
+    const entries = (await fs.readFile(filePath, "utf8")).split(/\r?\n/).filter(Boolean).map(JSON.parse);
+    print(replayArtifact({ driver, marker, entries }));
+    return;
+  }
   throw new Error("unknown command; use session, auth, events, daemon, or telegram");
 }
 
 async function runService(mode) {
+  if (mode === "telegram") {
+    const config = loadConfig();
+    const adapterLock = await acquireRuntimeLock(path.join(config.stateDir, "telegram"));
+    const openaiHelper = new OpenAIHelper({ config });
+    const telegram = new TelegramAdapter({ config, openaiHelper });
+    const stop = async () => {
+      telegram.stop();
+      await adapterLock.release();
+      process.exit();
+    };
+    process.on("SIGINT", stop);
+    process.on("SIGTERM", stop);
+    try {
+      await telegram.run();
+    } finally {
+      await adapterLock.release();
+    }
+    return;
+  }
   const runtime = await createRuntime();
   const started = await runtime.server.start();
   process.stderr.write(`[cli-runtime] listening on ${started.socketPath}\n`);
-  let telegram = null;
-  if (mode === "telegram") {
-    telegram = new TelegramAdapter({ config: runtime.config });
-    telegram.run().catch((err) => {
-      process.stderr.write(`[telegram] fatal: ${err.message}\n`);
-      process.exitCode = 1;
-    });
-  }
-  const stop = async () => {
-    telegram?.stop();
-    await runtime.server.stop();
-    process.exit();
-  };
+  const stop = async () => { await runtime.server.stop(); process.exit(); };
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
   await new Promise(() => {});
@@ -150,4 +187,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createRuntime, main, runClient, waitForSubmission };
+module.exports = { createRuntime, main, parseSendArguments, runClient, waitForSubmission };

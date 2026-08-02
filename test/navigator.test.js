@@ -20,12 +20,68 @@ test("navigator exposes a bounded driver-neutral recovery contract", async () =>
       return { ok: true, json: async () => ({ action: "press_key", key: "Enter", reason: "confirm known prompt" }) };
     },
   });
-  const decision = await navigator.decide({ driver: "codex", phase: "session_start", goal: "reach prompt", screen: "unknown screen" });
+  const decision = await navigator.decide({
+    driver: "codex",
+    phase: "session_start",
+    goal: "reach prompt",
+    screen: "unknown screen sk-secretsecretsecret",
+    sessionKey: "private-route-key",
+  });
   assert.deepEqual(decision, { action: "press_key", key: "Enter", reason: "confirm known prompt" });
   assert.equal(requestBody.driver, "codex");
+  assert.equal("sessionKey" in requestBody, false);
+  assert.doesNotMatch(requestBody.screen, /sk-secret/);
   assert.ok(requestBody.allowedActions.press_key.keys.includes("Escape"));
   assert.throws(() => normalizeDecision({ action: "press_key", key: "C-z" }), /unsupported key/);
   assert.throws(() => normalizeDecision({ action: "submit_text", text: "a\nb" }), /invalid text/);
+  assert.throws(() => normalizeDecision({ action: "submit_text", text: "a\u001bb" }), /invalid text/);
+});
+
+test("navigator redacts before taking the bounded screen tail", async () => {
+  let requestBody = null;
+  const navigator = new Navigator({
+    config: { navigator: { url: "http://navigator.test/decide", apiKey: "", timeoutMs: 1000 } },
+    eventStore: { append: async () => {} },
+    fetchImpl: async (_url, options) => {
+      requestBody = JSON.parse(options.body);
+      return { ok: true, json: async () => ({ action: "wait", reason: "observe" }) };
+    },
+  });
+  const token = `sk-${"ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"}`;
+  await navigator.decide({
+    driver: "claude",
+    phase: "session_start",
+    goal: "reach prompt",
+    screen: `${token}${"x".repeat(3990)}`,
+  });
+  assert.doesNotMatch(requestBody.screen, /1234567890/);
+});
+
+test("navigator uses the direct OpenAI helper when no endpoint is configured", async () => {
+  let payload = null;
+  const navigator = new Navigator({
+    config: { navigator: { url: "", apiKey: "", timeoutMs: 1000, useOpenAI: true } },
+    eventStore: { append: async () => {} },
+    openaiHelper: {
+      enabled: true,
+      navigationDecision: async (value) => {
+        payload = value;
+        return { action: "auth_required", key: null, text: null, reason: "login screen" };
+      },
+    },
+  });
+  const decision = await navigator.decide({ driver: "claude", phase: "auth", goal: "authenticate", screen: "Login required" });
+  assert.deepEqual(decision, { action: "auth_required", reason: "login screen" });
+  assert.equal(payload.driver, "claude");
+  assert.equal(payload.allowedActions.submit_text.maxChars, 256);
+});
+
+test("an OpenAI key does not implicitly enable terminal navigation", () => {
+  const navigator = new Navigator({
+    config: { navigator: { url: "", apiKey: "", timeoutMs: 1000, useOpenAI: false } },
+    openaiHelper: { enabled: true },
+  });
+  assert.equal(navigator.enabled, false);
 });
 
 test("unknown startup screens use navigator fallback and reach ready", async (t) => {

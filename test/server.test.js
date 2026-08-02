@@ -78,4 +78,32 @@ test("Unix socket API exposes asynchronous sessions and durable long-poll events
   await events.append("test.event", { sessionKey: "api/main" });
   const awakened = await waiting;
   assert.equal(awakened.events[0].type, "test.event");
+  await assert.rejects(
+    () => request(config.socketPath, "POST", `/v1/sessions/${encodeURIComponent("missing")}/interrupt`, {}),
+    (error) => error.statusCode === 404,
+  );
+  await assert.rejects(
+    () => request(config.socketPath, "GET", "/v1/events?limit=not-a-number"),
+    (error) => error.statusCode === 400,
+  );
+});
+
+test("a second daemon cannot take a live state directory or unlink its socket", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-singleton-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const configA = { stateDir: path.join(root, "state"), socketPath: path.join(root, "a.sock") };
+  const configB = { stateDir: configA.stateDir, socketPath: path.join(root, "b.sock") };
+  const eventsA = new EventStore(configA.stateDir);
+  const eventsB = new EventStore(configB.stateDir);
+  await eventsA.init();
+  await eventsB.init();
+  const noopSessions = { list: async () => [] };
+  const noopAuth = {};
+  const first = createServer({ config: configA, sessions: noopSessions, auth: noopAuth, eventStore: eventsA });
+  const second = createServer({ config: configB, sessions: noopSessions, auth: noopAuth, eventStore: eventsB });
+  await first.start();
+  t.after(() => first.stop());
+  await assert.rejects(() => second.start(), (error) => error.code === "RUNTIME_ALREADY_RUNNING");
+  assert.equal((await request(configA.socketPath, "GET", "/health")).ok, true);
+  await assert.rejects(() => fs.access(configB.socketPath));
 });

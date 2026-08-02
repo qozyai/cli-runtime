@@ -5,396 +5,242 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const {
-  WorkspaceState,
-  normalizeProgress,
-  selectRecentTurns,
-  summarizeProgress,
-} = require("../src/workspace-state");
+const { WorkspaceState, readJsonlLossless, selectRecentTurns } = require("../src/workspace-state");
+const { normalizeProgress } = require("../src/progress");
 
-test("workspace state stages inputs, bounds progress, archives outputs, and waits for delivery ack", async (t) => {
+async function fixture(t, config = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-workspace-"));
   const workspace = path.join(root, "workspace");
-  const source = path.join(root, "voice.ogg");
-  await fs.mkdir(path.join(workspace, ".git", "info"), { recursive: true });
-  await fs.writeFile(source, "audio-data");
+  await fs.mkdir(workspace);
   t.after(() => fs.rm(root, { recursive: true, force: true }));
+  return { root, workspace, state: new WorkspaceState({ config }) };
+}
 
-  const state = new WorkspaceState({ config: {} });
-  const sessionKey = "telegram:42:main";
-  const submissionId = "sub_test";
-  const acceptedAt = "2026-08-02T10:00:00.000Z";
-  const started = await state.startTurn({
+function submission(id, status = "completed") {
+  return {
+    submissionId: id,
+    status,
+    message: "make a file",
+    inputs: [],
+    reply: status === "completed" ? "done" : null,
+    error: status === "completed" ? null : "failed",
+    acceptedAt: "2026-08-01T00:00:00.000Z",
+    startedAt: "2026-08-01T00:00:01.000Z",
+    completedAt: "2026-08-01T00:00:02.000Z",
+  };
+}
+
+async function begin(state, workspace, id, inputs = []) {
+  return state.startTurn({
     workspace,
-    sessionKey,
-    submissionId,
-    driver: "claude",
-    message: "Inspect sk-secret-value-that-must-not-leak",
-    inputs: [{ sourcePath: source, name: "voice.ogg", mimeType: "audio/ogg", transcript: "spoken words" }],
-    acceptedAt,
+    sessionKey: "main",
+    submissionId: id,
+    driver: "codex",
+    message: "make a file",
+    inputs,
+    acceptedAt: "2026-08-01T00:00:00.000Z",
   });
+}
 
-  assert.equal(started.inputs.length, 1);
-  assert.match(started.inputs[0].path, /\.qozyai\/io\/inbox\/[a-f0-9]{16}_001_voice\.ogg$/);
-  assert.equal(await fs.readFile(started.inputs[0].path, "utf8"), "audio-data");
-  assert.equal(await fs.readFile(started.inputs[0].transcriptPath, "utf8"), "spoken words");
-  assert.match(await fs.readFile(path.join(workspace, ".git", "info", "exclude"), "utf8"), /^\.qozyai\/$/m);
-
-  const progress = {
-    throughOffset: 1234,
-    providerSessionId: "provider-one",
-    artifactPath: "/tmp/provider.jsonl",
-    reasoning: ["one", "two", "three", "Using sk-another-secret-value to inspect four"],
-    toolUses: [
-      { id: "one", tool: "Read", arguments: { path: "a" }, success: true },
-      { id: "two", tool: "Bash", arguments: { command: "true" }, success: true },
-      { id: "three", tool: "Write", arguments: { apiKey: "must-hide" }, success: false, error: "Bearer secret-token-value failed" },
-      { id: "four", tool: "Edit", arguments: { text: "x".repeat(5000) }, success: null },
-    ],
-  };
-  const active = await state.updateTurn({ workspace, submissionId, progress, status: "running", startedAt: acceptedAt });
-  assert.deepEqual(active.reasoning.slice(0, 2), ["two", "three"]);
-  assert.match(active.reasoning[2], /\[redacted\]/);
-  assert.equal(active.tools.length, 3);
-  assert.equal(active.tools[1].arguments.apiKey, "[redacted]");
-  assert.ok(active.summary.length <= 500);
-  assert.doesNotMatch(JSON.stringify(active), /another-secret|must-hide|secret-token-value/);
-
-  const outputName = `${state.sessionHash(sessionKey)}_report.docx`;
-  const outputPath = path.join(workspace, ".qozyai", "io", "outbox", outputName);
-  await fs.writeFile(outputPath, "word-file");
-  const submission = {
-    submissionId,
-    message: "Inspect secret=do-not-store",
-    inputs: started.inputs,
-    outputBaseline: started.outputBaseline,
-    status: "completed",
-    reply: "Finished",
-    error: null,
-    acceptedAt,
-    startedAt: acceptedAt,
-    completedAt: "2026-08-02T10:01:00.000Z",
-  };
-  const finished = await state.finishTurn({ workspace, sessionKey, submission, driver: "claude", progress });
-  assert.equal(finished.outputs.length, 1);
-  assert.equal(finished.outputs[0].originalName, "report.docx");
-  assert.equal(finished.outputs[0].mimeType, "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
-  assert.equal(finished.outputs[0].deliveryStatus, "pending");
-  assert.equal(await fs.readFile(finished.outputs[0].archivePath, "utf8"), "word-file");
-  await assert.rejects(() => fs.access(state.activePath(workspace, submissionId)));
-
-  const history = (await fs.readFile(state.historyPath(workspace, sessionKey), "utf8")).trim().split("\n").map(JSON.parse);
-  assert.equal(history.length, 1);
-  assert.equal(history[0].tools.length, 3);
-  assert.doesNotMatch(JSON.stringify(history), /do-not-store|another-secret|must-hide|secret-token-value/);
-
+test("each submission owns exact inbox and outbox directories with individual delivery ack", async (t) => {
+  const { root, workspace, state } = await fixture(t);
+  const source = path.join(root, "voice.ogg");
+  await fs.writeFile(source, "audio");
+  const started = await begin(state, workspace, "sub_one", [{
+    sourcePath: source,
+    name: "voice.ogg",
+    mimeType: "audio/ogg",
+    transcript: "hello",
+  }]);
+  assert.match(started.inputs[0].path, /\.qozyai\/io\/inbox\/sub_one\/001_voice\.ogg$/);
+  assert.match(started.promptContext, /outbox\/sub_one/);
+  const outbox = state.turnPaths(workspace, "sub_one").turnOutbox;
+  await fs.writeFile(path.join(outbox, "answer.txt"), "answer");
+  await fs.writeFile(path.join(outbox, "second.txt"), "second");
+  const finished = await state.finishTurn({
+    workspace,
+    sessionKey: "main",
+    driver: "codex",
+    submission: submission("sub_one"),
+    progress: { toolUses: [{ id: "call-1", tool: "Bash", arguments: { password: "secret" }, success: true }] },
+  });
+  assert.deepEqual(finished.outputs.map((item) => item.originalName), ["answer.txt", "second.txt"]);
+  assert.ok(finished.outputs.every((item) => item.deliveryStatus === "pending"));
   const acknowledged = await state.acknowledgeOutputs({
     workspace,
-    sessionKey,
-    submissionId,
+    sessionKey: "main",
+    submissionId: "sub_one",
     outputs: finished.outputs,
+    outputIds: [finished.outputs[0].outputId],
   });
   assert.equal(acknowledged[0].deliveryStatus, "delivered");
-  await assert.rejects(() => fs.access(outputPath));
-  assert.equal(await fs.readFile(finished.outputs[0].archivePath, "utf8"), "word-file");
+  assert.equal(acknowledged[1].deliveryStatus, "pending");
 });
 
-test("workspace state rejects symlink inputs and ignores unchanged pending output", async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-workspace-"));
-  const workspace = path.join(root, "workspace");
-  await fs.mkdir(workspace, { recursive: true });
-  const target = path.join(root, "target.txt");
-  const link = path.join(root, "link.txt");
-  await fs.writeFile(target, "target");
-  await fs.symlink(target, link);
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
-
-  const state = new WorkspaceState({ config: { workspaceMaxOutputFiles: 1 } });
-  await assert.rejects(() => state.startTurn({
-    workspace,
-    sessionKey: "main",
-    submissionId: "bad",
-    driver: "codex",
-    message: "file",
-    inputs: [{ sourcePath: link, name: "link.txt" }],
-    acceptedAt: "2026-08-02T10:00:00.000Z",
-  }), /direct regular file/);
-
-  await state.ensure(workspace);
-  const outputPath = path.join(workspace, ".qozyai", "io", "outbox", `${state.sessionHash("main")}_pending.txt`);
-  const secondOutputPath = path.join(workspace, ".qozyai", "io", "outbox", `${state.sessionHash("main")}_second.txt`);
-  await fs.writeFile(outputPath, "pending");
-  await fs.writeFile(secondOutputPath, "also pending");
-  const started = await state.startTurn({
-    workspace,
-    sessionKey: "main",
-    submissionId: "next",
-    driver: "codex",
-    message: "next",
-    acceptedAt: "2026-08-02T11:00:00.000Z",
-  });
+test("same-size and same-mtime output rewrites cannot be missed", async (t) => {
+  const { workspace, state } = await fixture(t);
+  await begin(state, workspace, "sub_rewrite");
+  const filePath = path.join(state.turnPaths(workspace, "sub_rewrite").turnOutbox, "report.txt");
+  await fs.writeFile(filePath, "AAAAAAAAAA");
+  const timestamp = new Date("2026-08-01T00:00:00.000Z");
+  await fs.utimes(filePath, timestamp, timestamp);
+  await fs.writeFile(filePath, "BBBBBBBBBB");
+  await fs.utimes(filePath, timestamp, timestamp);
   const finished = await state.finishTurn({
     workspace,
     sessionKey: "main",
-    driver: "codex",
-    progress: {},
-    submission: {
-      submissionId: "next",
-      message: "next",
-      inputs: [],
-      outputBaseline: started.outputBaseline,
-      status: "completed",
-      reply: "done",
-      acceptedAt: "2026-08-02T11:00:00.000Z",
-      completedAt: "2026-08-02T11:01:00.000Z",
-    },
-  });
-  assert.deepEqual(finished.outputs, []);
-  assert.equal(await fs.readFile(outputPath, "utf8"), "pending");
-  assert.equal(await fs.readFile(secondOutputPath, "utf8"), "also pending");
-});
-
-test("workspace input staging is transactional", async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-workspace-stage-"));
-  const workspace = path.join(root, "workspace");
-  const valid = path.join(root, "valid.txt");
-  const target = path.join(root, "target.txt");
-  const invalid = path.join(root, "invalid.txt");
-  await fs.mkdir(workspace, { recursive: true });
-  await fs.writeFile(valid, "valid");
-  await fs.writeFile(target, "target");
-  await fs.symlink(target, invalid);
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
-
-  const state = new WorkspaceState({ config: {} });
-  const paths = await state.ensure(workspace);
-  const existingPath = path.join(paths.inbox, `${state.sessionHash("main")}_existing.txt`);
-  await fs.writeFile(existingPath, "existing");
-
-  await assert.rejects(() => state.startTurn({
-    workspace,
-    sessionKey: "main",
-    submissionId: "transactional",
     driver: "claude",
-    message: "inspect inputs",
-    inputs: [
-      { sourcePath: valid, name: "valid.txt" },
-      { sourcePath: invalid, name: "invalid.txt" },
-    ],
-    acceptedAt: "2026-08-02T12:00:00.000Z",
-  }), /direct regular file/);
-
-  assert.equal(await fs.readFile(existingPath, "utf8"), "existing");
-  assert.deepEqual(await fs.readdir(paths.historyInbox), []);
+    submission: submission("sub_rewrite"),
+    progress: null,
+  });
+  assert.equal(await fs.readFile(finished.outputs[0].archivePath, "utf8"), "BBBBBBBBBB");
 });
 
-test("failed output finalization is discarded and repeated finalization is idempotent", async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-workspace-finalize-"));
-  const workspace = path.join(root, "workspace");
-  await fs.mkdir(workspace, { recursive: true });
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
-
-  const state = new WorkspaceState({ config: {} });
-  const sessionKey = "delegate:failed";
-  const submissionId = "failed-once";
-  const acceptedAt = "2026-08-02T13:00:00.000Z";
-  const started = await state.startTurn({
-    workspace,
-    sessionKey,
-    submissionId,
-    driver: "codex",
-    message: "fail after writing",
-    acceptedAt,
+test("invalid output entries are reported without hiding valid siblings or later turns", async (t) => {
+  const { workspace, state } = await fixture(t);
+  await begin(state, workspace, "sub_invalid");
+  const firstOutbox = state.turnPaths(workspace, "sub_invalid").turnOutbox;
+  await fs.mkdir(path.join(firstOutbox, "directory"));
+  await fs.writeFile(path.join(firstOutbox, "valid.txt"), "valid");
+  const first = await state.finishTurn({
+    workspace, sessionKey: "main", driver: "claude", submission: submission("sub_invalid"), progress: null,
   });
-  const outputPath = path.join(workspace, ".qozyai", "io", "outbox", `${state.sessionHash(sessionKey)}_partial.txt`);
-  await fs.writeFile(outputPath, "partial output");
-  const submission = {
-    submissionId,
-    message: "fail after writing",
-    inputs: [],
-    outputBaseline: started.outputBaseline,
-    status: "failed",
-    reply: "",
-    error: "expected failure",
-    acceptedAt,
-    startedAt: acceptedAt,
-    completedAt: "2026-08-02T13:01:00.000Z",
-  };
+  assert.deepEqual(first.outputs.map((item) => item.originalName), ["valid.txt"]);
+  assert.match(first.outputError, /not a direct regular file/);
+  assert.equal((await fs.stat(path.join(state.turnPaths(workspace, "sub_invalid").turnHistoryOutbox, "directory"))).isDirectory(), true);
 
-  const first = await state.finishTurn({ workspace, sessionKey, submission, driver: "codex", progress: {} });
+  await begin(state, workspace, "sub_later");
+  await fs.writeFile(path.join(state.turnPaths(workspace, "sub_later").turnOutbox, "later.txt"), "later");
+  const later = await state.finishTurn({
+    workspace, sessionKey: "main", driver: "claude", submission: submission("sub_later"), progress: null,
+  });
+  assert.deepEqual(later.outputs.map((item) => item.originalName), ["later.txt"]);
+  assert.equal(later.outputError, null);
+});
+
+test("output names are preserved without normalization collisions", async (t) => {
+  const { workspace, state } = await fixture(t);
+  await begin(state, workspace, "sub_names");
+  const outbox = state.turnPaths(workspace, "sub_names").turnOutbox;
+  await fs.writeFile(path.join(outbox, "final report.md"), "spaced");
+  await fs.writeFile(path.join(outbox, "final-report.md"), "hyphenated");
+  const finished = await state.finishTurn({
+    workspace, sessionKey: "main", driver: "claude", submission: submission("sub_names"), progress: null,
+  });
+  assert.deepEqual(finished.outputs.map((item) => item.originalName), ["final report.md", "final-report.md"]);
+  assert.equal(await fs.readFile(finished.outputs[0].archivePath, "utf8"), "spaced");
+  assert.equal(await fs.readFile(finished.outputs[1].archivePath, "utf8"), "hyphenated");
+});
+
+test("failed finalization is discarded and repeated finalization is idempotent", async (t) => {
+  const { workspace, state } = await fixture(t);
+  await begin(state, workspace, "sub_failed");
+  await fs.writeFile(path.join(state.turnPaths(workspace, "sub_failed").turnOutbox, "debug.txt"), "debug");
+  const failed = submission("sub_failed", "failed");
+  const first = await state.finishTurn({ workspace, sessionKey: "main", driver: "codex", submission: failed, progress: null });
+  const second = await state.finishTurn({ workspace, sessionKey: "main", driver: "codex", submission: failed, progress: null });
   assert.equal(first.outputs[0].deliveryStatus, "discarded");
-  await assert.rejects(() => fs.access(outputPath));
-  const second = await state.finishTurn({ workspace, sessionKey, submission, driver: "codex", progress: {} });
   assert.equal(second.reused, true);
-  const history = (await fs.readFile(state.historyPath(workspace, sessionKey), "utf8")).trim().split("\n").map(JSON.parse);
-  assert.equal(history.length, 1);
+  assert.equal(second.outputs[0].outputId, first.outputs[0].outputId);
 });
 
-test("output validation completes before any archive is created", async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-workspace-output-validation-"));
-  const workspace = path.join(root, "workspace");
-  await fs.mkdir(workspace, { recursive: true });
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+test("input staging is transactional and abort-aware", async (t) => {
+  const { root, workspace, state } = await fixture(t);
+  const good = path.join(root, "good.txt");
+  const link = path.join(root, "link.txt");
+  await fs.writeFile(good, "good");
+  await fs.symlink(good, link);
+  await assert.rejects(() => begin(state, workspace, "sub_bad", [
+    { sourcePath: good, name: "good.txt" },
+    { sourcePath: link, name: "link.txt" },
+  ]), /direct regular file/);
+  await assert.rejects(() => fs.access(state.turnPaths(workspace, "sub_bad").turnInbox));
 
-  const state = new WorkspaceState({ config: { workspaceMaxOutputFileBytes: 5 } });
-  const sessionKey = "main";
-  const acceptedAt = "2026-08-02T13:30:00.000Z";
-  const started = await state.startTurn({
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(() => state.startTurn({
     workspace,
-    sessionKey,
-    submissionId: "invalid-outputs",
+    sessionKey: "main",
+    submissionId: "sub_abort",
     driver: "claude",
-    message: "write outputs",
-    acceptedAt,
-  });
-  const outbox = state.paths(workspace).outbox;
-  await fs.writeFile(path.join(outbox, `${state.sessionHash(sessionKey)}_a.txt`), "one");
-  await fs.writeFile(path.join(outbox, `${state.sessionHash(sessionKey)}_b.txt`), "too-large");
-  const finished = await state.finishTurn({
-    workspace,
-    sessionKey,
-    driver: "claude",
-    progress: {},
-    submission: {
-      submissionId: "invalid-outputs",
-      message: "write outputs",
-      inputs: [],
-      outputBaseline: started.outputBaseline,
-      status: "completed",
-      reply: "done",
-      acceptedAt,
-      completedAt: "2026-08-02T13:31:00.000Z",
-    },
-  });
-  assert.deepEqual(finished.outputs, []);
-  assert.match(finished.outputError, /output file exceeds/);
-  assert.deepEqual(await fs.readdir(state.paths(workspace).historyOutbox), []);
+    message: "stop",
+    inputs: [{ sourcePath: good, name: "good.txt" }],
+    acceptedAt: new Date().toISOString(),
+    signal: controller.signal,
+  }), /interrupted/);
 });
 
-test("prefixed output directories fail explicitly instead of disappearing", async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-workspace-output-directory-"));
-  const workspace = path.join(root, "workspace");
-  await fs.mkdir(workspace, { recursive: true });
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
-
-  const state = new WorkspaceState({ config: {} });
-  const sessionKey = "main";
-  const acceptedAt = "2026-08-02T13:45:00.000Z";
-  const started = await state.startTurn({
-    workspace,
-    sessionKey,
-    submissionId: "directory-output",
-    driver: "codex",
-    message: "return a site",
-    acceptedAt,
-  });
-  const outputDirectory = path.join(state.paths(workspace).outbox, `${state.sessionHash(sessionKey)}_site`);
-  await fs.mkdir(outputDirectory);
-  await fs.writeFile(path.join(outputDirectory, "index.html"), "<h1>site</h1>");
-  const finished = await state.finishTurn({
-    workspace,
-    sessionKey,
-    driver: "codex",
-    progress: {},
-    submission: {
-      submissionId: "directory-output",
-      message: "return a site",
-      inputs: [],
-      outputBaseline: started.outputBaseline,
-      status: "completed",
-      reply: "done",
-      acceptedAt,
-      completedAt: "2026-08-02T13:46:00.000Z",
-    },
-  });
-  assert.deepEqual(finished.outputs, []);
-  assert.match(finished.outputError, /output is not a direct regular file/);
-});
-
-test("workspace history repairs a crash-truncated final JSONL record", async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-workspace-jsonl-"));
-  const workspace = path.join(root, "workspace");
-  await fs.mkdir(workspace, { recursive: true });
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
-
-  const state = new WorkspaceState({ config: {} });
+test("history pruning quarantines malformed lines and keeps unclassifiable records", async (t) => {
+  const { workspace, state } = await fixture(t);
   await state.ensure(workspace);
-  const sessionKey = "main";
-  const historyPath = state.historyPath(workspace, sessionKey);
-  const prior = {
-    version: 1,
-    kind: "turn",
-    submissionId: "prior",
-    inboundAt: "2026-08-02T10:00:00.000Z",
-    completedAt: "2026-08-02T10:01:00.000Z",
-  };
-  await fs.writeFile(historyPath, `${JSON.stringify(prior)}\n{\"partial\"`, "utf8");
-  const acceptedAt = "2026-08-02T14:00:00.000Z";
-  const started = await state.startTurn({
-    workspace,
-    sessionKey,
-    submissionId: "after-crash",
-    driver: "claude",
-    message: "continue",
-    acceptedAt,
-  });
-  await state.finishTurn({
-    workspace,
-    sessionKey,
-    driver: "claude",
-    progress: {},
-    submission: {
-      submissionId: "after-crash",
-      message: "continue",
-      inputs: [],
-      outputBaseline: started.outputBaseline,
-      status: "completed",
-      reply: "continued",
-      acceptedAt,
-      completedAt: "2026-08-02T14:01:00.000Z",
-    },
-  });
-  const history = (await fs.readFile(historyPath, "utf8")).trim().split("\n").map(JSON.parse);
-  assert.deepEqual(history.map((record) => record.submissionId), ["prior", "after-crash"]);
+  const historyPath = state.historyPath(workspace, "main");
+  const valid = { version: 1, submissionId: "valid", inboundAt: "2026-08-01T00:00:00Z", completedAt: "2026-08-01T00:01:00Z" };
+  const unknown = { version: 99, submissionId: "unknown", inboundAt: "not-a-time", completedAt: null };
+  await fs.writeFile(historyPath, `${JSON.stringify(valid)}\n{malformed}\n${JSON.stringify(unknown)}\n`);
+  await state.prune(workspace);
+  const text = await fs.readFile(historyPath, "utf8");
+  assert.match(text, /"version":99/);
+  const parsed = await readJsonlLossless(historyPath);
+  assert.equal(parsed.errors.length, 0);
+  const quarantine = (await fs.readdir(path.dirname(historyPath))).find((name) => name.startsWith(`${path.basename(historyPath)}.corrupt-`));
+  assert.ok(quarantine);
+  assert.match(await fs.readFile(path.join(path.dirname(historyPath), quarantine), "utf8"), /\{malformed\}/);
 });
 
-test("48 active-hour retention keeps whole newest work clusters", () => {
-  const turn = (id, startHour, endHour) => ({
+test("normalized progress omits tool arguments and preserves one tool identity shape", () => {
+  const normalized = normalizeProgress({
+    toolUses: [{ id: "call-1", tool: "exec", arguments: { api_key: "secret" }, success: false, error: "token=hidden" }],
+  });
+  assert.deepEqual(Object.keys(normalized.tools[0]).sort(), ["error", "id", "success", "tool"]);
+  assert.equal(normalized.tools[0].id, "call-1");
+  assert.doesNotMatch(JSON.stringify(normalized), /api_key|secret|token=hidden/);
+});
+
+test("48 active-hour retention keeps invalid timestamps and newest work clusters", () => {
+  const turn = (id, start, hours) => ({
     submissionId: id,
-    inboundAt: new Date(Date.UTC(2026, 0, 1, startHour)).toISOString(),
-    completedAt: new Date(Date.UTC(2026, 0, 1, endHour)).toISOString(),
+    inboundAt: new Date(start).toISOString(),
+    completedAt: new Date(new Date(start).getTime() + hours * 3600_000).toISOString(),
   });
   const turns = [
-    turn("old", 0, 10),
-    turn("middle", 16, 40),
-    turn("new", 46, 70),
+    turn("old", "2026-07-01T00:00:00Z", 30),
+    turn("new-a", "2026-07-10T00:00:00Z", 30),
+    turn("new-b", "2026-07-11T06:00:00Z", 30),
+    { submissionId: "unknown", inboundAt: "bad", completedAt: null },
   ];
-  assert.deepEqual(selectRecentTurns(turns).map((item) => item.submissionId), ["middle", "new"]);
-  assert.ok(summarizeProgress({ reasoning: ["x".repeat(1000)] }).length <= 500);
-  assert.match(summarizeProgress({ lastAssistantMessage: "Checking files now." }), /Checking files now/);
-  assert.match(summarizeProgress({
-    reasoning: ["Reading the config."],
-    toolUses: [{ tool: "Read", success: true }],
-    lastError: "boom",
-  }), /^Working\.\nReading the config\.\nRecent tools: Read \(ok\)\nError: boom$/);
+  const retained = selectRecentTurns(turns);
+  assert.deepEqual(retained.map((item) => item.submissionId), ["new-a", "new-b", "unknown"]);
 });
 
-test("Codex JSON tool arguments receive key-based secret redaction", () => {
-  const normalized = normalizeProgress({
-    toolUses: [{
-      tool: "exec",
-      arguments: JSON.stringify({
-        api_key: "ordinary-unstructured-value",
-        password: "hunter2hunter2",
-        nested: { authorization: "opaque-credential", safe: "visible" },
-      }),
-      success: true,
-    }],
-  });
-  assert.deepEqual(normalized.tools[0].arguments, {
-    api_key: "[redacted]",
-    password: "[redacted]",
-    nested: { authorization: "[redacted]", safe: "visible" },
-  });
-  assert.doesNotMatch(JSON.stringify(normalized), /ordinary-unstructured-value|hunter2hunter2|opaque-credential/);
+test("pruning retains an old turn while any output is still pending", async (t) => {
+  const { workspace, state } = await fixture(t);
+  state.schedulePrune = () => {};
+  const times = [
+    ["2026-01-01T00:00:00.000Z", "2026-01-02T06:00:00.000Z"],
+    ["2026-01-02T13:00:00.000Z", "2026-01-03T19:00:00.000Z"],
+    ["2026-01-04T02:00:00.000Z", "2026-01-05T08:00:00.000Z"],
+  ];
+  const finished = [];
+  for (let index = 0; index < times.length; index += 1) {
+    const id = `sub_pending_${index}`;
+    await begin(state, workspace, id);
+    await fs.writeFile(path.join(state.turnPaths(workspace, id).turnOutbox, `output-${index}.txt`), String(index));
+    const record = submission(id);
+    record.acceptedAt = times[index][0];
+    record.startedAt = times[index][0];
+    record.completedAt = times[index][1];
+    finished.push(await state.finishTurn({ workspace, sessionKey: "main", driver: "claude", submission: record, progress: null }));
+  }
+  for (const index of [1, 2]) {
+    await state.acknowledgeOutputs({
+      workspace,
+      sessionKey: "main",
+      submissionId: `sub_pending_${index}`,
+      outputs: finished[index].outputs,
+    });
+  }
+  await state.prune(workspace);
+  const history = await readJsonlLossless(state.historyPath(workspace, "main"));
+  assert.ok(history.records.some((record) => record.submissionId === "sub_pending_0"));
+  await fs.access(finished[0].outputs[0].archivePath);
 });

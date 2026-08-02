@@ -1,70 +1,65 @@
 # Turn State And File Exchange
 
-The runtime keeps driver-neutral project continuity under the workspace:
+The runtime keeps portable, driver-neutral continuity under the workspace:
 
 ```text
 .qozyai/
   history/
     <session-hash>.jsonl
-    active/
-      <submission-id>.json
+    active/<submission-id>.json
   io/
-    inbox/
-    outbox/
+    inbox/<submission-id>/
+    outbox/<submission-id>/
     history/
-      inbox/
-      outbox/
+      inbox/<submission-id>/
+      outbox/<submission-id>/
       events.jsonl
 ```
 
-`.qozyai/` is added to the repository-local Git exclude file when the workspace
-is a Git root. State files are private runtime data and are not project source.
+The runtime adds `.qozyai/` to the repository-local Git exclude once per
+workspace. These files are private runtime state, not project source.
 
-## Deterministic V1
+## Submission Lifecycle
 
-At submission acceptance, the runtime stages caller-provided regular files into
-the live inbox and immutable input archive. Files are prefixed with a hash of the
-stable caller `sessionKey`; driver switches do not change that hash. Audio may
-have a caller-provided transcript sidecar, but the runtime does not invent or
-silently transcribe audio.
+The daemon creates the submission's directories before it submits the prompt.
+Caller inputs are copied transactionally into the exact inbox and its history
+archive. The prompt names the exact outbox directory. No model-generated hash
+prefix, baseline snapshot, mtime comparison, or filename signature is involved.
 
-While the turn is active, the provider artifact watcher updates
-`history/active/<submission-id>.json`. The record contains:
+While work is active, `history/active/<submission-id>.json` contains the latest
+artifact cursor, provider session ID, three bounded reasoning chunks, three tool
+records shaped as `{id, tool, success, error}`, and a 500-character summary.
+Tool arguments and successful tool output are excluded.
 
-- provider artifact cursor and opaque provider session ID
-- latest three bounded plaintext reasoning chunks
-- latest three bounded tool calls with call ID, arguments, status, and failure
-  detail only when failed
-- a deterministic status summary capped at 500 characters
+At terminal completion, the whole submission outbox is atomically moved into
+history before it is inspected. Valid direct files are returned with stable
+output IDs and their exact names. Invalid, oversized, and excess entries are
+reported and preserved in that archive rather than deleted. Delivery
+acknowledgement is per output; pending archives are retained even if their turn
+would otherwise age out.
 
-Known credential shapes and values under secret-like argument keys are
-redacted. Encrypted/hidden reasoning and successful tool output are excluded.
-If a driver exposes no plaintext reasoning, its latest visible assistant
-progress message is used as the summary fallback.
-An event is emitted only when normalized progress changes.
+## History
 
-On terminal completion, the runtime appends one normalized turn to the session
-JSONL and removes the active snapshot. Output files must be direct regular files
-in the live outbox and use the session prefix shown in the submission prompt.
-They are copied into immutable output history and returned as pending delivery.
-The live copy is deleted only after the caller acknowledges successful delivery.
+Each terminal turn is appended once to the session JSONL. JSONL reads never
+mutate files. A torn final line is repaired explicitly under the workspace lock
+and copied to a quarantine file first. Unknown versions, invalid timestamps,
+and malformed lines are never inferred to be garbage. Malformed lines are
+copied verbatim to a mode-0600 quarantine file before the parseable JSONL is
+rewritten, so one damaged line cannot disable all later workspace cleanup.
 
-History and linked I/O archives use QozyAI's active-work retention rule:
+Voice transcripts are included in the normalized user turn so later sessions
+do not lose the substance of audio-only messages. Raw provider artifacts,
+transcripts, and normalized history remain sensitive workspace data even though
+known credential forms are redacted as defense in depth.
 
-- a gap of at least six hours starts a new work cluster
-- newest whole clusters are retained until their accumulated active duration
-  reaches at least 48 hours
-- idle gaps do not consume the 48-hour budget
+Retention uses active work rather than wall-clock gaps:
 
-## Future Interpreted Observer
+- a gap of at least six hours starts another work cluster
+- newest complete clusters are retained until their accumulated durations reach
+  at least 48 hours
+- gaps between clusters do not consume the 48-hour budget
+- unclassifiable records are retained
 
-The API deliberately leaves room for an optional cheap observer, but V1 does
-not call another model. A future observer can run as an independent sibling
-session, consume only the bounded provider JSONL diff after its persisted
-cursor, and replace the deterministic summary with an interpreted one. It may
-also maintain `<submission-id>_interpreted.json`.
-
-That observer must remain advisory: it cannot submit input to the main driver,
-decide completion, mutate conversation history, or block the main turn. The
-active-turn file and progress event contracts remain stable so Telegram and
-QozyAI do not need a second integration path.
+Runtime events, submissions, prompts, active snapshots, and I/O archives are
+separately bounded operational state. Event cursors older than the retained
+window receive an explicit cursor-expired response.

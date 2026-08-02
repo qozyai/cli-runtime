@@ -24,18 +24,21 @@ function loadConfig(env = process.env) {
     socketPath: path.resolve(env.CLI_RUNTIME_SOCKET || path.join(stateDir, "runtime.sock")),
     tmuxSocketName: String(env.CLI_RUNTIME_TMUX_SOCKET || "qozyai-cli-runtime").trim(),
     startupTimeoutMs: positiveNumber(env.CLI_RUNTIME_STARTUP_TIMEOUT_MS, 30_000),
+    bindTimeoutMs: positiveNumber(env.CLI_RUNTIME_BIND_TIMEOUT_MS, 15_000),
     submissionTimeoutMs: positiveNumber(env.CLI_RUNTIME_SUBMISSION_TIMEOUT_MS, 30 * 60_000),
     artifactPollMs: positiveNumber(env.CLI_RUNTIME_ARTIFACT_POLL_MS, 150),
-    workspaceMaxInputFiles: positiveNumber(env.CLI_RUNTIME_MAX_INPUT_FILES, 20),
-    workspaceMaxInputFileBytes: positiveNumber(env.CLI_RUNTIME_MAX_INPUT_FILE_BYTES, 50 * 1024 * 1024),
-    workspaceMaxInputTotalBytes: positiveNumber(env.CLI_RUNTIME_MAX_INPUT_TOTAL_BYTES, 100 * 1024 * 1024),
-    workspaceMaxOutputFiles: positiveNumber(env.CLI_RUNTIME_MAX_OUTPUT_FILES, 20),
-    workspaceMaxOutputFileBytes: positiveNumber(env.CLI_RUNTIME_MAX_OUTPUT_FILE_BYTES, 100 * 1024 * 1024),
-    workspaceMaxOutputTotalBytes: positiveNumber(env.CLI_RUNTIME_MAX_OUTPUT_TOTAL_BYTES, 200 * 1024 * 1024),
     navigator: {
       url: String(env.CLI_RUNTIME_NAVIGATOR_URL || "").trim(),
       apiKey: String(env.CLI_RUNTIME_NAVIGATOR_API_KEY || "").trim(),
       timeoutMs: positiveNumber(env.CLI_RUNTIME_NAVIGATOR_TIMEOUT_MS, 15_000),
+      useOpenAI: env.CLI_RUNTIME_OPENAI_NAVIGATOR === "1",
+    },
+    openai: {
+      apiKey: String(env.OPENAI_API_KEY || "").trim(),
+      baseUrl: String(env.OPENAI_BASE_URL || "https://api.openai.com/v1").trim(),
+      navigatorModel: String(env.CLI_RUNTIME_NAVIGATOR_MODEL || "gpt-5.4-mini").trim(),
+      transcriptionModel: String(env.CLI_RUNTIME_TRANSCRIPTION_MODEL || "gpt-4o-transcribe").trim(),
+      transcriptionTimeoutMs: positiveNumber(env.CLI_RUNTIME_TRANSCRIPTION_TIMEOUT_MS, 60_000),
     },
     drivers: {
       claude: {
@@ -60,6 +63,7 @@ function loadConfig(env = process.env) {
       workspace: path.resolve(env.CLI_RUNTIME_TELEGRAM_WORKSPACE || process.cwd()),
       statusEditIntervalMs: positiveNumber(env.CLI_RUNTIME_TELEGRAM_STATUS_EDIT_MS, 30_000),
       maxFileBytes: positiveNumber(env.CLI_RUNTIME_TELEGRAM_MAX_FILE_BYTES, 20 * 1024 * 1024),
+      requestTimeoutMs: positiveNumber(env.CLI_RUNTIME_TELEGRAM_REQUEST_TIMEOUT_MS, 30_000),
       allowedChatIds: new Set(String(env.CLI_RUNTIME_TELEGRAM_ALLOWED_CHATS || "")
         .split(",")
         .map((item) => item.trim())

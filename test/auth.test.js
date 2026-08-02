@@ -2,6 +2,9 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs/promises");
+const os = require("node:os");
+const path = require("node:path");
 const { AuthManager, terminalUrls } = require("../src/auth-manager");
 
 test("auth navigation recognizes wrapped current provider URLs", () => {
@@ -19,4 +22,114 @@ test("auth navigation recognizes wrapped current provider URLs", () => {
   assert.equal(manager.parseAuthPrompt("claude", claude).phase, "awaiting_code");
   assert.equal(manager.parseAuthPrompt("codex", codex).phase, "awaiting_browser");
   assert.equal(manager.parseAuthPrompt("codex", codex).code, "ABCD-EFGH");
+});
+
+test("auth status distinguishes unknown command failure from unauthenticated", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-auth-state-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const broken = path.join(root, "broken");
+  const loggedOut = path.join(root, "logged-out");
+  await fs.writeFile(broken, "#!/bin/sh\necho crashed >&2\nexit 2\n", { mode: 0o700 });
+  await fs.writeFile(loggedOut, "#!/bin/sh\necho 'Not logged in' >&2\nexit 1\n", { mode: 0o700 });
+  const manager = new AuthManager({
+    config: {
+      stateDir: root,
+      drivers: {
+        claude: { command: broken, homeDir: root },
+        codex: { command: loggedOut, homeDir: root },
+      },
+    },
+    tmux: {},
+    eventStore: {},
+  });
+  const claude = await manager.status("claude");
+  const codex = await manager.status("codex");
+  assert.equal(claude.state, "unknown");
+  assert.equal(claude.authenticated, null);
+  assert.match(claude.error, /crashed/);
+  assert.equal(codex.state, "unauthenticated");
+  assert.equal(codex.authenticated, false);
+});
+
+test("auth status subprocess receives only the execution environment allowlist", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-auth-env-"));
+  const command = path.join(root, "status");
+  const secretKeys = ["OPENAI_API_KEY", "GH_PAT", "DATABASE_URL", "STRIPE_SK"];
+  const previous = Object.fromEntries(secretKeys.map((key) => [key, process.env[key]]));
+  for (const key of secretKeys) process.env[key] = "must-not-reach-auth";
+  t.after(async () => {
+    for (const key of secretKeys) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  await fs.writeFile(command, [
+    "#!/bin/sh",
+    "test -n \"$PATH\" || exit 3",
+    `test \"$HOME\" = \"${root}\" || exit 4`,
+    ...secretKeys.map((key) => `test -z \"$${key}\" || exit 5`),
+    "printf '%s\\n' '{\"loggedIn\":false,\"authMethod\":\"none\"}'",
+  ].join("\n"), { mode: 0o700 });
+  const manager = new AuthManager({
+    config: {
+      stateDir: root,
+      drivers: { claude: { command, homeDir: root } },
+    },
+    tmux: {},
+    eventStore: {},
+  });
+  const status = await manager.status("claude");
+  assert.equal(status.state, "unauthenticated");
+  assert.equal(status.error, undefined);
+});
+
+test("auth start reuses an active login unless force is requested", async () => {
+  let killed = 0;
+  const manager = new AuthManager({
+    config: {
+      stateDir: "/tmp/unused-auth-state",
+      startupTimeoutMs: 100,
+      drivers: { claude: { command: "claude", homeDir: "/tmp" } },
+    },
+    tmux: {
+      has: async () => true,
+      driverState: async () => ({ paneDead: false, state: "running", exitCode: null }),
+      capture: async () => "https://claude.ai/oauth/authorize?code=true",
+      kill: async () => { killed += 1; },
+      attachCommand: () => "attach",
+    },
+    eventStore: { append: async () => {} },
+  });
+  manager.status = async () => ({ driver: "claude", state: "unauthenticated", authenticated: false });
+  const started = await manager.start("claude");
+  assert.equal(started.phase, "awaiting_code");
+  assert.equal(killed, 0);
+});
+
+test("auth start relaunches a dead login pane instead of reusing starting forever", async () => {
+  let killed = 0;
+  let started = 0;
+  const manager = new AuthManager({
+    config: {
+      stateDir: "/tmp/unused-auth-dead-state",
+      startupTimeoutMs: 100,
+      drivers: { claude: { command: "claude", homeDir: "/tmp" } },
+    },
+    tmux: {
+      has: async () => true,
+      driverState: async () => ({ paneDead: true, state: "exited", exitCode: 1 }),
+      capture: async () => "stale login screen",
+      kill: async () => { killed += 1; },
+      createShell: async () => {},
+      startCommand: async () => { started += 1; },
+      attachCommand: () => "attach",
+    },
+    eventStore: { append: async () => {} },
+  });
+  manager.status = async () => ({ driver: "claude", state: "unauthenticated", authenticated: false });
+  const result = await manager.start("claude");
+  assert.equal(result.phase, "failed");
+  assert.equal(killed, 1);
+  assert.equal(started, 1);
 });

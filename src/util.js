@@ -4,6 +4,23 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const crypto = require("node:crypto");
 
+const CHILD_ENV_ALLOWLIST = [
+  "PATH",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "NO_COLOR",
+  "FORCE_COLOR",
+  "TZ",
+  "TMPDIR",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "NODE_EXTRA_CA_CERTS",
+];
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -36,6 +53,19 @@ function createId(prefix) {
 
 function shellQuote(value) {
   return `'${String(value ?? "").replace(/'/g, `'"'"'`)}'`;
+}
+
+function isolatedProcessEnv(overrides = {}, source = process.env) {
+  const env = {};
+  for (const key of CHILD_ENV_ALLOWLIST) {
+    if (source[key] !== undefined && source[key] !== null) env[key] = String(source[key]);
+  }
+  if (!env.PATH) env.PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+  for (const [key, value] of Object.entries(overrides)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || value === undefined || value === null) continue;
+    env[key] = String(value);
+  }
+  return env;
 }
 
 async function readJson(filePath, fallback = null) {
@@ -93,6 +123,7 @@ function tailText(value, maxChars = 16_000) {
 module.exports = {
   appendJsonl,
   createId,
+  isolatedProcessEnv,
   nowIso,
   readBody,
   readJson,

@@ -23,6 +23,16 @@ function normalizePrompt(prompt) {
     .trim();
 }
 
+function hasPromptCandidate(screen, glyph) {
+  return String(screen || "").split(/\r?\n/).some((line) => {
+    const trimmed = line.trimStart();
+    if (!trimmed.startsWith(glyph)) return false;
+    const remainder = trimmed.slice(glyph.length);
+    if (!/^[\s\u00a0]/.test(remainder)) return false;
+    return !/^\s*\d+(?:[.)])?(?:\s|$)/.test(remainder);
+  });
+}
+
 function driverConfig(config, driver) {
   return config.drivers[normalizeDriver(driver)];
 }
@@ -58,20 +68,24 @@ function buildLaunch(config, session) {
       HOME: selected.homeDir,
       DISABLE_AUTOUPDATER: "1",
       CLI_RUNTIME_DRIVER: driver,
-      CLI_RUNTIME_SESSION_KEY: session.sessionKey,
     },
   };
 }
 
 function isReady(driver, screen) {
   const recent = recentScreen(screen);
-  if (isAuthRequired(driver, recent)) return false;
-  if (driverExit(recent) !== null) return false;
   if (driver === "claude") {
-    return /(^|\n)\s*❯(?:\s|\u00a0)/m.test(recent);
+    if (/WARNING: Claude Code running in Bypass Permissions mode|Try the new fullscreen renderer\?|Choose the text style|Security notes|Quick safety check|Select login method/i.test(recent)) return false;
+    return hasPromptCandidate(recent, "❯");
   }
-  if (/esc to interrupt|tab to queue message|still working/i.test(recent)) return false;
-  return /(^|\n)\s*›(?:\s|\u00a0)/m.test(recent);
+  if (/esc to interrupt|tab to queue message|still working|Do you trust the contents of this directory\?|update available/i.test(recent)) return false;
+  return hasPromptCandidate(recent, "›");
+}
+
+function isStartupAuthScreen(driver, screen) {
+  const text = recentScreen(screen, 16);
+  if (driver === "claude") return /Select login method|Opening browser to sign in|Paste code here/i.test(text);
+  return /Sign in with ChatGPT|Log in with ChatGPT|auth\.openai\.com\/codex\/device/i.test(text);
 }
 
 function isAuthRequired(driver, screen) {
@@ -116,6 +130,7 @@ module.exports = {
   driverExit,
   isAuthRequired,
   isReady,
+  isStartupAuthScreen,
   normalizeDriver,
   normalizePrompt,
   recentScreen,

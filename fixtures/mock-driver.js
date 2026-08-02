@@ -37,7 +37,7 @@ function append(value) {
 
 function complete(line) {
   const clean = line.replace(/\s*<cli-runtime-submission id="[^"]+"\/>\s*$/, "").trim();
-  if (clean.includes("EXIT")) process.exit(7);
+  if (clean.includes("EXIT") && !clean.includes("EXIT_AFTER_ARTIFACT")) process.exit(7);
   if (clean.includes("HANG")) {
     if (driver === "claude") append({ type: "user", sessionId, message: { role: "user", content: line } });
     else append({ type: "event_msg", payload: { type: "user_message", message: line } });
@@ -78,6 +78,7 @@ function complete(line) {
     }
     append({ type: "event_msg", payload: { type: "task_complete", last_agent_message: reply } });
   }
+  if (clean.includes("EXIT_AFTER_ARTIFACT")) process.exit(0);
   process.stdout.write(`\n${reply}\n`);
   rl.prompt();
 }
@@ -96,7 +97,7 @@ rl.on("line", (line) => {
     }
     return;
   }
-  const delay = line.includes("SLOW") ? 1500 : 20;
+  const delay = line.includes("DELAY_BIND") ? 5000 : line.includes("SLOW") ? 1500 : 20;
   setTimeout(() => complete(line), delay);
 });
 rl.on("close", () => process.exit(0));

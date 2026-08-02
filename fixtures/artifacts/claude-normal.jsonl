@@ -1,0 +1,2 @@
+{"type":"user","sessionId":"00000000-0000-4000-8000-000000000011","message":{"role":"user","content":"fixture <cli-runtime-submission id=\"fixture-claude-normal\"/>"}}
+{"type":"assistant","sessionId":"00000000-0000-4000-8000-000000000011","message":{"role":"assistant","content":[{"type":"text","text":"Normal completion."}],"stop_reason":"end_turn"}}

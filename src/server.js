@@ -2,14 +2,43 @@
 
 const fs = require("node:fs/promises");
 const http = require("node:http");
+const net = require("node:net");
 const { readBody, sendJson } = require("./util");
+const { acquireRuntimeLock } = require("./runtime-lock");
 
 function decode(value) {
   return decodeURIComponent(String(value || ""));
 }
 
-function createServer({ config, sessions, auth, eventStore, log = console.error }) {
+function numericParam(url, name, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const raw = url.searchParams.get(name);
+  if (raw === null || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < min || value > max) {
+    const error = new Error(`invalid ${name}`);
+    error.code = "INVALID_ARGUMENT";
+    throw error;
+  }
+  return value;
+}
+
+function createServer({ config, sessions, auth, eventStore, ownershipLock = null, log = console.error }) {
   let server = null;
+  let runtimeLock = null;
+
+  function socketIsLive(socketPath) {
+    return new Promise((resolve) => {
+      const socket = net.createConnection(socketPath);
+      const finish = (value) => {
+        socket.removeAllListeners();
+        socket.destroy();
+        resolve(value);
+      };
+      socket.setTimeout(500, () => finish(false));
+      socket.once("connect", () => finish(true));
+      socket.once("error", () => finish(false));
+    });
+  }
 
   async function handle(req, res) {
     const url = new URL(req.url, "http://unix");
@@ -66,16 +95,17 @@ function createServer({ config, sessions, auth, eventStore, log = console.error 
       }
       if (parts[0] === "v1" && parts[1] === "submissions" && parts[2]
         && parts[3] === "outputs" && parts[4] === "ack" && req.method === "POST") {
-        const submission = await sessions.acknowledgeOutputs(decode(parts[2]));
+        const body = await readBody(req);
+        const submission = await sessions.acknowledgeOutputs(decode(parts[2]), Array.isArray(body.outputIds) ? body.outputIds : null);
         sendJson(res, submission ? 200 : 404, submission ? { ok: true, submission } : { ok: false, error: "submission not found" });
         return;
       }
       if (req.method === "GET" && url.pathname === "/v1/events") {
         const events = await eventStore.wait({
-          after: Number(url.searchParams.get("after") || 0),
+          after: numericParam(url, "after", 0),
           sessionKey: url.searchParams.get("sessionKey") || null,
-          waitMs: Number(url.searchParams.get("waitMs") || 0),
-          limit: Math.min(1000, Math.max(1, Number(url.searchParams.get("limit") || 500))),
+          waitMs: numericParam(url, "waitMs", 0, { min: 0, max: 30_000 }),
+          limit: numericParam(url, "limit", 500, { min: 1, max: 1000 }),
         });
         sendJson(res, 200, { ok: true, events });
         return;
@@ -99,7 +129,10 @@ function createServer({ config, sessions, auth, eventStore, log = console.error 
       }
       sendJson(res, 404, { ok: false, error: "not found" });
     } catch (err) {
-      const status = err.code === "SESSION_BUSY" ? 409 : err.code === "AUTH_REQUIRED" ? 401 : 400;
+      const status = err.code === "SESSION_BUSY" ? 409
+        : err.code === "AUTH_REQUIRED" ? 401
+          : err.code === "EVENT_CURSOR_EXPIRED" ? 410
+            : err.code === "SESSION_NOT_FOUND" ? 404 : 400;
       sendJson(res, status, { ok: false, error: err.message || String(err), code: err.code || null });
     }
   }
@@ -107,27 +140,42 @@ function createServer({ config, sessions, auth, eventStore, log = console.error 
   return {
     async start() {
       await fs.mkdir(config.stateDir, { recursive: true });
-      await fs.rm(config.socketPath, { force: true });
-      server = http.createServer((req, res) => handle(req, res).catch((err) => {
-        log(`[cli-runtime] request failed: ${err.message}`);
-        if (!res.headersSent) sendJson(res, 500, { ok: false, error: err.message });
-      }));
-      await new Promise((resolve, reject) => {
-        server.once("error", reject);
-        server.listen(config.socketPath, () => {
-          server.off("error", reject);
-          resolve();
+      runtimeLock = ownershipLock || await acquireRuntimeLock(config.stateDir);
+      try {
+        const socketStat = await fs.lstat(config.socketPath).catch(() => null);
+        if (socketStat && await socketIsLive(config.socketPath)) {
+          const err = new Error(`runtime socket is already live: ${config.socketPath}`);
+          err.code = "RUNTIME_ALREADY_RUNNING";
+          throw err;
+        }
+        if (socketStat) await fs.rm(config.socketPath, { force: true });
+        server = http.createServer((req, res) => handle(req, res).catch((err) => {
+          log(`[cli-runtime] request failed: ${err.message}`);
+          if (!res.headersSent) sendJson(res, 500, { ok: false, error: err.message });
+        }));
+        await new Promise((resolve, reject) => {
+          server.once("error", reject);
+          server.listen(config.socketPath, () => {
+            server.off("error", reject);
+            resolve();
+          });
         });
-      });
-      await fs.chmod(config.socketPath, 0o600);
-      await eventStore.append("runtime.started", { socketPath: config.socketPath });
-      return { socketPath: config.socketPath };
+        await fs.chmod(config.socketPath, 0o600);
+        await eventStore.append("runtime.started", { socketPath: config.socketPath });
+        return { socketPath: config.socketPath };
+      } catch (err) {
+        await runtimeLock.release();
+        runtimeLock = null;
+        throw err;
+      }
     },
     async stop() {
       if (!server) return;
       await new Promise((resolve) => server.close(resolve));
       server = null;
       await fs.rm(config.socketPath, { force: true });
+      await runtimeLock?.release();
+      runtimeLock = null;
     },
   };
 }

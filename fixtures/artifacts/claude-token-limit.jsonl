@@ -1,0 +1,2 @@
+{"type":"user","sessionId":"00000000-0000-4000-8000-000000000012","message":{"role":"user","content":"fixture <cli-runtime-submission id=\"fixture-claude-limit\"/>"}}
+{"type":"assistant","sessionId":"00000000-0000-4000-8000-000000000012","message":{"role":"assistant","content":[{"type":"text","text":"Partial response."}],"stop_reason":"max_tokens"}}

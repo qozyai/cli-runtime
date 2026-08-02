@@ -1,41 +1,46 @@
 # QozyAI CLI Runtime
 
-`cli-runtime` controls real Claude Code and Codex interactive sessions in
-`tmux`. A user can attach to the same terminal the daemon is driving, inspect
-problems, and intervene directly.
+`cli-runtime` drives real Claude Code and Codex interactive sessions in `tmux`.
+A human can attach to the same pane, inspect it, and intervene directly. The
+runtime is driver-neutral, but it necessarily understands each driver's launch
+arguments and artifact format.
 
-The runtime deliberately does not know about QozyAI conversations, delegates,
-reminders, heartbeat, or wake intents. Callers represent every independent
-execution context with a session key.
+It does not implement QozyAI conversations, delegates, reminders, or wake
+policy. A caller represents each independent execution lane with a session key.
 
 ## Guarantees
 
-- one active submission per session
-- independent sessions may run concurrently
-- completion is read from driver artifacts, not inferred from terminal text
-- terminal text is used only for readiness, auth navigation, and diagnostics
-- caller session keys are durable; provider session IDs remain internal
-- every event has a durable sequence number for replay
-- the API listens on a local Unix socket by default
-- normalized project history and file exchange stay under `<workspace>/.qozyai`
+- one daemon exclusively owns each state directory
+- one Telegram adapter exclusively owns that state directory's ingress queue
+- one active submission per session; independent sessions remain concurrent
+- vendor JSONL artifacts, not terminal text, decide turn completion
+- terminal text is used only before submission for readiness, auth, and recovery
+- driver liveness and exit status come from tmux pane lifecycle, not pane text or pane-writable metadata
+- every submission owns exact inbox and outbox directories
+- event replay uses a bounded durable window with explicit cursor expiry
+- normalized history and file exchange live under `<workspace>/.qozyai`
+
+Raw provider artifacts and normalized workspace history can contain sensitive
+project data. Tool arguments are excluded from normalized history and events;
+bounded redaction is defense-in-depth, not a secrecy boundary.
 
 ## Start
 
 ```bash
 export CLI_RUNTIME_CLAUDE_HOME="$HOME/.claude-runtime"
 export CLI_RUNTIME_CODEX_HOME="$HOME/.codex-runtime"
-export CLI_RUNTIME_CODEX_MODEL="gpt-5.6-sol"
 cli-runtime daemon
 ```
 
-The default socket is
-`~/.local/state/qozyai-cli-runtime/runtime.sock`.
+The daemon owns the default socket at
+`~/.local/state/qozyai-cli-runtime/runtime.sock`. A second daemon using the same
+state directory is rejected even if it requests another socket.
 
 ## Local CLI
 
 ```bash
 cli-runtime session create main claude "$HOME/project"
-cli-runtime session send main "Inspect the failing tests" --wait
+cli-runtime session send main --wait -- "Inspect the failing tests"
 cli-runtime session status main
 cli-runtime session output main
 cli-runtime session interrupt main
@@ -44,14 +49,18 @@ cli-runtime session restart main
 cli-runtime session close main
 ```
 
-`session attach` opens the exact resident terminal used by the runtime. Detach
-with the normal tmux key sequence (`Ctrl-b d`); finishing a provider turn in
-that terminal preserves the provider session for later API submissions.
+`session attach` opens the resident terminal. Detach with `Ctrl-b d`.
 
-Forked sessions are optional:
+Create a same-driver fork when the provider session supports it:
 
 ```bash
 cli-runtime session create delegated claude "$HOME/project" --fork-from main
+```
+
+Replay a captured provider artifact deterministically:
+
+```bash
+cli-runtime artifact replay claude '<cli-runtime-submission id="..."/>' trace.jsonl
 ```
 
 ## API
@@ -73,35 +82,16 @@ POST   /v1/auth/:driver/start
 POST   /v1/auth/:driver/submit
 ```
 
-`session.submit` returns immediately. Consumers follow its `submissionId`
-through the submission endpoint or durable event stream.
+Submission progress contains a bounded summary, up to three plaintext
+reasoning chunks exposed by the provider, and up to three tool records shaped
+as `{id, tool, success, error}`. Successful tool output and tool arguments are
+not retained in normalized state.
 
-Submission progress is deterministic. It includes a bounded status summary,
-the latest three plaintext reasoning chunks exposed by the provider artifact,
-and the latest three tool records (`callId`, `tool`, bounded `arguments`,
-`success`, and an error only on failure). Encrypted or hidden reasoning and
-successful tool output are not retained.
-
-Local callers attach files by passing `inputs` to a submission:
+Output acknowledgement accepts optional individual IDs:
 
 ```json
-{
-  "message": "Review the recording",
-  "inputs": [
-    {
-      "sourcePath": "/shared/upload/recording.ogg",
-      "name": "recording.ogg",
-      "mimeType": "audio/ogg",
-      "transcript": "optional caller-provided transcript"
-    }
-  ]
-}
+{"outputIds":["output-id"]}
 ```
-
-Inputs must be direct regular files reachable by the runtime. Completed
-submissions return archived output descriptors. A caller acknowledges outputs
-only after successful delivery; acknowledgement clears the live outbox copy but
-keeps the bounded archive.
 
 ## Authentication
 
@@ -109,65 +99,64 @@ keeps the bounded archive.
 cli-runtime auth status claude
 cli-runtime auth start claude
 cli-runtime auth submit claude '<authorization-code>'
-
 cli-runtime auth status codex
 cli-runtime auth start codex
 ```
 
-Codex device authorization completes in the browser and needs no submitted
-code. Add `--force` to `auth start` to test or replace existing credentials.
-
-## Mapping From QozyAI
-
-- main lane: one long-lived session
-- delegate: another session, optionally forked from main
-- heartbeat or consolidation: temporary session, submit once, then close
-- reminder/check-in/handover: submit to main
-- shell background jobs and app processes: remain outside this runtime
+Status is one of `authenticated`, `unauthenticated`, or `unknown`. A failed
+status command never masquerades as logged out. An active login is reused unless
+`auth start ... --force` explicitly replaces it. Dead login panes are replaced
+automatically. Driver and authentication subprocesses receive only a small
+allowlist of execution variables plus explicit driver settings; arbitrary daemon
+environment variables and runtime credentials are not inherited.
 
 ## Telegram
 
-Set `TELEGRAM_BOT_TOKEN` and run:
+Telegram is a separate API-only process; start the daemon first:
 
 ```bash
-cli-runtime telegram
-```
-
-Telegram is an adapter over the same Unix-socket API. Core session behavior
-does not depend on Telegram. Text, documents, photos, audio, voice, and video
-are accepted. While a turn runs, Telegram edits one explicit status message at
-most every 30 seconds and sends final text/files separately. Optional settings
-are:
-
-```bash
+export TELEGRAM_BOT_TOKEN="..."
 export CLI_RUNTIME_TELEGRAM_DRIVER=claude
 export CLI_RUNTIME_TELEGRAM_WORKSPACE="$HOME/project"
 export CLI_RUNTIME_TELEGRAM_ALLOWED_CHATS="12345,67890"
-export CLI_RUNTIME_TELEGRAM_STATUS_EDIT_MS=30000
-export CLI_RUNTIME_TELEGRAM_MAX_FILE_BYTES=20971520
+cli-runtime telegram
 ```
 
-Supported commands are `/start`, `/driver claude`, `/driver codex`, `/status`,
-`/stop`, and `/reset`. Messages are serialized per chat/topic while different
-routes remain concurrent.
+Accepted updates are persisted before Telegram's offset advances and replayed
+after adapter restart. Ordinary messages serialize per chat/topic. `/status`
+and `/stop` run immediately. `/reset` and `/driver` interrupt immediately, then
+act as ordered barriers before later messages on that route.
 
-## Navigation Fallback
+`CLI_RUNTIME_TELEGRAM_ALLOWED_CHATS` fails closed: an empty value accepts no
+updates. List explicit chat IDs, or use `*` only for an intentionally public bot.
 
-Known provider screens stay on the deterministic fast path. To handle unknown
-provider UI states with a separate intelligence service, set:
+Text, documents, photos, audio, voice, video, and video notes are accepted. Files are
+acknowledged individually after delivery; oversized or failed siblings are
+reported without stranding successful files.
+
+Set `OPENAI_API_KEY` to optionally transcribe audio with
+`gpt-4o-transcribe`. The original media is always submitted. Transcription
+failure is visible to the user and does not discard the media.
+
+## Navigation
+
+Known startup screens stay deterministic. Unknown startup/auth/recovery screens
+may use an explicit external navigator:
 
 ```bash
 export CLI_RUNTIME_NAVIGATOR_URL="http://127.0.0.1:7000/decide"
 export CLI_RUNTIME_NAVIGATOR_API_KEY="..." # optional
 ```
 
-The runtime posts the driver, phase, target state, bounded terminal screen, and
-an explicit action schema. The service may return only `wait`, `press_key`,
-`submit_text`, `auth_required`, or `fail`; keys and submitted text are validated
-before they reach tmux. QozyAI can provide this endpoint without moving its
-conversation or lane policy into this module.
+Direct OpenAI navigation is disabled unless explicitly enabled:
 
-## Workspace State
+```bash
+export OPENAI_API_KEY="..."
+export CLI_RUNTIME_OPENAI_NAVIGATOR=1
+```
 
-See [`docs/turn-state.md`](docs/turn-state.md) for the deterministic history,
-file lifecycle, retention, and deferred interpreted-observer contract.
+Navigator requests omit session keys, contain only a redacted 4,000-character
+pane tail, and use a strict action schema. Navigation is never consulted after
+a submission binds; vendor artifacts remain the completion authority.
+
+See [`docs/turn-state.md`](docs/turn-state.md) for workspace state and retention.

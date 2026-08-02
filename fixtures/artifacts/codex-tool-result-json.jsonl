@@ -1,0 +1,6 @@
+{"type":"session_meta","payload":{"id":"00000000-0000-4000-8000-000000000024"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"fixture <cli-runtime-submission id=\"fixture-codex-json\"/>"}}
+{"type":"response_item","payload":{"type":"function_call","call_id":"json-failed","name":"exec","arguments":"false"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"json-failed","output":"{\"metadata\":{\"exit_code\":3},\"output\":\"command failed\"}"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"Handled JSON-wrapped failure."}}
+{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"Handled JSON-wrapped failure."}}
