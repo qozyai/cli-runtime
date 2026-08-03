@@ -528,6 +528,20 @@ class SessionManager {
     throw new Error("driver did not accept prompt before bind timeout");
   }
 
+  async waitForPromptEcho(session, marker, signal) {
+    const deadline = Date.now() + Math.min(this.config.bindTimeoutMs || 15_000, 2000);
+    while (Date.now() < deadline) {
+      if (signal.aborted) throw new Error("submission interrupted");
+      const screen = await this.tmux.capture(session.tmuxSessionName, 40);
+      if (screen.includes(marker)) return;
+      const state = await this.tmux.driverState(session.tmuxSessionName);
+      if (state.paneDead) {
+        throw new Error(`driver exited (${state.exitCode ?? "unknown"}) before accepting prompt`);
+      }
+      await sleep(50);
+    }
+  }
+
   async executeSubmission(session, submission, submittedPrompt, activeRuntime) {
     const { controller } = activeRuntime;
     const rootDir = artifactRoot(this.config, session.driver);
@@ -611,7 +625,8 @@ class SessionManager {
         promptPath,
         `prompt-${safeId(submission.submissionId, 16)}`,
       );
-      await sleep(100);
+      // tmux can finish writing before a busy TUI has consumed the bracketed paste.
+      await this.waitForPromptEcho(session, submission.marker, controller.signal);
       await this.confirmSubmission(session, observed, controller.signal);
       activeRuntime.phase = "running";
       session.status = "running";

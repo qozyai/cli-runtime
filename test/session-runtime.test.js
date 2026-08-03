@@ -382,6 +382,67 @@ test("delayed artifact binding waits without repeatedly submitting Enter", async
   assert.equal(enters, 1);
 });
 
+test("submission waits for the pasted marker to reach the terminal before Enter", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-delayed-paste-"));
+  const workspace = path.join(root, "workspace");
+  const home = path.join(root, "home");
+  await Promise.all([workspace, home].map((dir) => fs.mkdir(dir, { recursive: true })));
+  const config = {
+    stateDir: path.join(root, "state"),
+    tmuxSocketName: `cli-runtime-delayed-paste-${process.pid}-${Date.now()}`,
+    startupTimeoutMs: 5000,
+    bindTimeoutMs: 5000,
+    submissionTimeoutMs: 8000,
+    artifactPollMs: 25,
+    drivers: {
+      codex: {
+        command: path.join(__dirname, "..", "fixtures", "mock-driver.js"),
+        homeDir: home,
+        model: "",
+        sandbox: "danger-full-access",
+        approval: "never",
+        extraArgs: [],
+      },
+    },
+  };
+  const events = new EventStore(config.stateDir);
+  await events.init();
+  const tmux = new Tmux(config.tmuxSocketName);
+  const manager = new SessionManager({ config, tmux, eventStore: events });
+  await manager.init();
+  t.after(async () => {
+    await tmux.run(["kill-server"], { allowFailure: true });
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  await manager.create({ sessionKey: "main", driver: "codex", workspace });
+  const originalPasteFile = tmux.pasteFile.bind(tmux);
+  const originalCapture = tmux.capture.bind(tmux);
+  const originalSendKey = tmux.sendKey.bind(tmux);
+  let pastedAt = 0;
+  let enteredAt = 0;
+  tmux.pasteFile = async (...args) => {
+    await originalPasteFile(...args);
+    pastedAt = Date.now();
+  };
+  tmux.capture = async (...args) => {
+    const screen = await originalCapture(...args);
+    return pastedAt && Date.now() - pastedAt < 300 ? "paste still being consumed" : screen;
+  };
+  tmux.sendKey = async (sessionName, key) => {
+    if (key === "Enter" && pastedAt) enteredAt = Date.now();
+    return originalSendKey(sessionName, key);
+  };
+
+  const accepted = await manager.submit("main", { message: `VOICE ${"x".repeat(1200)}` });
+  const done = await waitFor(async () => {
+    const value = await manager.getSubmission(accepted.submissionId);
+    return value?.status === "completed" ? value : null;
+  }, 9000);
+  assert.match(done.reply, /VOICE/);
+  assert.ok(enteredAt - pastedAt >= 250, `Enter was sent after only ${enteredAt - pastedAt}ms`);
+});
+
 test("closing during preparation waits for interruption and leaves a terminal submission", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-stage-close-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
