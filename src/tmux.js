@@ -87,7 +87,7 @@ class Tmux {
   async pasteFile(sessionName, filePath, bufferName) {
     await this.run(["load-buffer", "-b", bufferName, filePath]);
     try {
-      await this.run(["paste-buffer", "-d", "-b", bufferName, "-t", sessionName]);
+      await this.run(["paste-buffer", "-p", "-d", "-b", bufferName, "-t", sessionName]);
     } finally {
       await this.run(["delete-buffer", "-b", bufferName], { allowFailure: true });
     }
