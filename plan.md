@@ -326,7 +326,7 @@ Use this layout:
 
 ## Implementation Evidence
 
-- The local and disposable-VM suites each pass all 63 tests.
+- The local and disposable-VM suites each pass all 64 tests.
 - Sanitized replay fixtures cover Claude normal, API-error, token-limit and
   `stop_sequence` records, plus Codex completion, abort, error, and command
   results.

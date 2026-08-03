@@ -22,7 +22,7 @@ from this review were resolved in the final remediation described in §3.
 | Open by explicit decision (deferred, rationale accepted) | 5 |
 | Blocklist-shaped fixes worth a follow-up | 1 |
 
-Final suite: 63 tests, passing locally and on the disposable VM.
+Final repository suite: 64 tests, passing locally and on the disposable VM.
 
 ---
 
@@ -202,7 +202,7 @@ The final remediation treats structural pane death as the invariant and keeps
 the numeric exit code as best-effort diagnostics. Exact numeric-code recovery
 has a separate real-tmux test. This follows the review's second recommendation
 and removes the flaky assertion without hiding process death. Two consecutive
-local full-suite runs and the disposable-VM full suite pass 63/63.
+local full-suite runs and the disposable-VM runtime suite pass 63/63.
 
 Isolated verification that the numeric mechanism works when tmux supplies it:
 

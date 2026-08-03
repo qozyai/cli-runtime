@@ -24,6 +24,25 @@ Raw provider artifacts and normalized workspace history can contain sensitive
 project data. Tool arguments are excluded from normalized history and events;
 bounded redaction is defense-in-depth, not a secrecy boundary.
 
+## Install
+
+Prerequisites are Git, tmux, Node.js 22 or newer, and at least one installed
+driver (`claude` or `codex`). Download and run the interactive installer:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/qozyai/cli-runtime/main/install.sh
+chmod +x install.sh
+./install.sh
+```
+
+The installer asks for the installation and working directories, selected
+driver, Telegram bot token, allowed chat IDs, and optional OpenAI transcription
+and navigation. It clones or safely updates the public repository, writes a
+mode-`0600` environment file, installs `~/.local/bin/cli-runtime`, and launches
+the daemon and Telegram adapter. It uses user-level systemd when available and
+otherwise starts isolated tmux supervisors. Rerunning it updates the clone and
+configuration.
+
 ## Start
 
 ```bash
