@@ -36,7 +36,7 @@ function loadConfig(env = process.env) {
     openai: {
       apiKey: String(env.OPENAI_API_KEY || "").trim(),
       baseUrl: String(env.OPENAI_BASE_URL || "https://api.openai.com/v1").trim(),
-      navigatorModel: String(env.CLI_RUNTIME_NAVIGATOR_MODEL || "gpt-5.4-mini").trim(),
+      navigatorModel: String(env.CLI_RUNTIME_NAVIGATOR_MODEL || "gpt-5.6-luna").trim(),
       transcriptionModel: String(env.CLI_RUNTIME_TRANSCRIPTION_MODEL || "gpt-4o-transcribe").trim(),
       transcriptionTimeoutMs: positiveNumber(env.CLI_RUNTIME_TRANSCRIPTION_TIMEOUT_MS, 60_000),
     },
