@@ -68,12 +68,11 @@ test("Telegram remains a thin adapter over the runtime API", async (t) => {
 
   const sent = telegramCalls.filter((call) => call.method === "sendMessage").map((call) => call.body.text);
   assert.ok(sent.some((text) => text === "Claude Code is ready."));
-  assert.ok(sent.some((text) => /MOCK_CLAUDE: hello from Telegram/.test(text)));
   assert.ok(sent.some((text) => text === "Codex selected."));
-  assert.ok(sent.some((text) => /MOCK_CODEX: hello from Codex/.test(text)));
   assert.ok(telegramCalls.some((call) => call.method === "sendChatAction"));
   const edits = telegramCalls.filter((call) => call.method === "editMessageText");
-  assert.ok(edits.some((call) => call.body.message_id && call.body.text === "Completed."));
+  assert.ok(edits.some((call) => call.body.message_id && /MOCK_CLAUDE: hello from Telegram/.test(call.body.text)));
+  assert.ok(edits.some((call) => call.body.message_id && /MOCK_CODEX: hello from Codex/.test(call.body.text)));
   assert.equal(chunks("x".repeat(8001)).length, 3);
 });
 
@@ -135,7 +134,33 @@ test("Telegram stages audio and edits one explicit progress message", async (t) 
   await adapter.waitSubmission(message, "sub-one", 777);
   const edits = calls.filter((call) => call.method === "editMessageText").map((call) => JSON.parse(call.body));
   assert.ok(edits.some((edit) => edit.message_id === 777 && /Inspecting the audio/.test(edit.text)));
-  assert.ok(edits.some((edit) => edit.message_id === 777 && edit.text === "Completed."));
+  assert.equal(edits.some((edit) => edit.text === "Completed."), false);
+});
+
+test("Telegram replaces progress with the final response and safely handles overflow", async () => {
+  const adapter = new TelegramAdapter({
+    config: {
+      stateDir: "/tmp",
+      telegram: { token: "token", defaultDriver: "claude", workspace: "/tmp", allowedChatIds: new Set() },
+    },
+  });
+  const edits = [];
+  const sent = [];
+  adapter.editStatus = async (_message, messageId, text) => {
+    edits.push({ messageId, text });
+    return { message_id: messageId };
+  };
+  adapter.send = async (_message, text) => { sent.push(text); };
+
+  await adapter.finalizeStatus({ chat: { id: 42 } }, 777, "x".repeat(8001));
+  assert.deepEqual(edits, [{ messageId: 777, text: "x".repeat(4000) }]);
+  assert.deepEqual(sent.map((text) => text.length), [4000, 1]);
+
+  edits.length = 0;
+  sent.length = 0;
+  adapter.editStatus = async () => null;
+  await adapter.finalizeStatus({ chat: { id: 42 } }, 777, "fallback reply");
+  assert.deepEqual(sent, ["fallback reply"]);
 });
 
 test("Telegram does not redeliver outputs that were already acknowledged", async (t) => {
@@ -302,6 +327,7 @@ test("Telegram visibly reports transcription failure while submitting original a
     throw new Error(`unexpected ${method} ${requestPath}`);
   };
   adapter.waitSubmission = async () => ({ submissionId: "sub-audio", status: "completed", reply: "heard", outputs: [] });
+  adapter.finalizeStatus = async (_message, _messageId, text) => { sent.push(text); };
   await adapter.handle({ chat: { id: 42 }, message_id: 4, voice: { file_id: "voice", file_size: 5, mime_type: "audio/ogg" } });
   assert.ok(sent.some((text) => /transcription failed/i.test(text)));
   assert.equal(submittedInputs[0].name, "voice.ogg");
@@ -338,9 +364,12 @@ test("Telegram does not report a user interruption as a model error", async (t) 
     error: "submission interrupted",
     outputs: [],
   });
+  const finalized = [];
+  adapter.finalizeStatus = async (_message, _messageId, text) => { finalized.push(text); };
 
   await adapter.handle({ chat: { id: 42 }, message_id: 5, text: "long task" });
   assert.deepEqual(sent, []);
+  assert.deepEqual(finalized, ["Interrupted."]);
 });
 
 test("Telegram chat admission fails closed unless explicitly allowlisted", async (t) => {

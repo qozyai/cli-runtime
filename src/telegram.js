@@ -122,6 +122,14 @@ class TelegramAdapter {
     }).catch(() => null);
   }
 
+  async finalizeStatus(message, messageId, text) {
+    const parts = chunks(text);
+    const edited = await this.editStatus(message, messageId, parts[0] || " ");
+    if (!edited) return this.send(message, text);
+    for (const part of parts.slice(1)) await this.send(message, part);
+    return [edited];
+  }
+
   async typing(message) {
     await this.api("sendChatAction", {
       chat_id: message.chat.id,
@@ -173,11 +181,7 @@ class TelegramAdapter {
       }
       const result = await this.runtime("GET", `/v1/submissions/${encodeURIComponent(submissionId)}`);
       const status = result.submission.status;
-      if (TERMINAL_SUBMISSION_STATES.has(status)) {
-        const finalStatus = status === "completed" ? "Completed." : status === "interrupted" ? "Interrupted." : "Stopped with an error.";
-        await this.editStatus(message, statusMessageId, finalStatus);
-        return result.submission;
-      }
+      if (TERMINAL_SUBMISSION_STATES.has(status)) return result.submission;
       const summary = String(result.submission.progress?.summary || "Working.").trim();
       if (summary && summary !== lastSummary
         && Date.now() - lastEditAt >= (this.config.telegram.statusEditIntervalMs || 30_000)) {
@@ -397,15 +401,19 @@ class TelegramAdapter {
     await this.typing(message);
     const statusMessage = await this.sendStatus(message);
     const completed = await this.waitSubmission(message, accepted.submission.submissionId, statusMessage?.message_id);
-    if (completed.status === "interrupted") return;
+    if (completed.status === "interrupted") {
+      await this.finalizeStatus(message, statusMessage?.message_id, "Interrupted.");
+      return;
+    }
     if (completed.status !== "completed") {
       const current = await this.runtime("GET", `/v1/sessions/${encodeURIComponent(this.sessionKey(message))}`);
       if (current.session.status === "auth_required") {
-        await this.send(message, await this.authMessage(route.driver));
+        await this.finalizeStatus(message, statusMessage?.message_id, await this.authMessage(route.driver));
         return;
       }
     }
-    await this.send(message, completed.status === "completed" ? completed.reply : `(model error: ${completed.error})`);
+    await this.finalizeStatus(message, statusMessage?.message_id,
+      completed.status === "completed" ? completed.reply : `(model error: ${completed.error})`);
     if (completed.outputError) await this.send(message, `Output warning: ${completed.outputError}`);
     const pending = completed.status === "completed"
       ? (completed.outputs || []).filter((output) => output.deliveryStatus === "pending")
