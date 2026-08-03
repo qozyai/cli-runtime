@@ -6,7 +6,7 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { WorkspaceState, readJsonlLossless, selectRecentTurns } = require("../src/workspace-state");
-const { normalizeProgress } = require("../src/progress");
+const { normalizeProgress, summarizeProgress } = require("../src/progress");
 
 async function fixture(t, config = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-workspace-"));
@@ -192,11 +192,26 @@ test("history pruning quarantines malformed lines and keeps unclassifiable recor
 
 test("normalized progress omits tool arguments and preserves one tool identity shape", () => {
   const normalized = normalizeProgress({
-    toolUses: [{ id: "call-1", tool: "exec", arguments: { api_key: "secret" }, success: false, error: "token=hidden" }],
+    toolCounts: { successful: 10, failed: 3 },
+    toolUses: [
+      { id: "call-old", tool: "Read", detail: "/tmp/old", success: true },
+      { id: "call-1", tool: "exec", arguments: { api_key: "secret" }, detail: "Deploy with token=hidden", success: false, error: "token=hidden" },
+    ],
   });
-  assert.deepEqual(Object.keys(normalized.tools[0]).sort(), ["error", "id", "success", "tool"]);
+  assert.equal(normalized.tools.length, 1);
+  assert.deepEqual(Object.keys(normalized.tools[0]).sort(), ["detail", "error", "id", "success", "tool"]);
   assert.equal(normalized.tools[0].id, "call-1");
+  assert.deepEqual(normalized.toolCounts, { successful: 10, failed: 3 });
   assert.doesNotMatch(JSON.stringify(normalized), /api_key|secret|token=hidden/);
+  const summary = summarizeProgress({
+    lastAssistantMessage: "Checking the release.",
+    toolCounts: { successful: 10, failed: 3 },
+    toolUses: [{ id: "call-1", tool: "exec", detail: "git diff --check", success: false, error: "failed" }],
+  });
+  assert.match(summary, /^Working\. \(10\/🔴3\)$/m);
+  assert.match(summary, /^Current: Checking the release\.$/m);
+  assert.match(summary, /^Last tool: exec — git diff --check \(🔴 failed: failed\)$/m);
+  assert.doesNotMatch(summary, /Recent tools/);
 });
 
 test("48 active-hour retention keeps invalid timestamps and newest work clusters", () => {

@@ -3,7 +3,7 @@
 const path = require("node:path");
 
 const MAX_REASONING_CHUNKS = 3;
-const MAX_TOOL_USES = 3;
+const MAX_TOOL_USES = 1;
 const MAX_REASONING_CHARS = 2000;
 const MAX_TOOL_ERROR_CHARS = 4000;
 const MAX_STATUS_CHARS = 500;
@@ -63,12 +63,26 @@ function normalizeProgress(progress, status = "running") {
     .filter(Boolean);
   const tools = (Array.isArray(progress?.toolUses) ? progress.toolUses : [])
     .slice(-MAX_TOOL_USES)
-    .map((tool) => ({
-      id: tool?.id || null,
-      tool: boundedText(tool?.tool || "unknown", 200),
-      success: typeof tool?.success === "boolean" ? tool.success : null,
-      error: tool?.success === false ? boundedText(tool?.error || "tool failed", MAX_TOOL_ERROR_CHARS) : null,
-    }));
+    .map((tool) => {
+      const normalized = {
+        id: tool?.id || null,
+        tool: boundedText(tool?.tool || "unknown", 200),
+        success: typeof tool?.success === "boolean" ? tool.success : null,
+        error: tool?.success === false ? boundedText(tool?.error || "tool failed", MAX_TOOL_ERROR_CHARS) : null,
+      };
+      const detail = boundedText(tool?.detail || "", 160);
+      if (detail) normalized.detail = detail;
+      return normalized;
+    });
+  const fallbackCounts = (Array.isArray(progress?.toolUses) ? progress.toolUses : []).reduce((counts, tool) => {
+    if (tool?.success === true) counts.successful += 1;
+    if (tool?.success === false) counts.failed += 1;
+    return counts;
+  }, { successful: 0, failed: 0 });
+  const toolCounts = {
+    successful: Math.max(0, Number(progress?.toolCounts?.successful) || fallbackCounts.successful),
+    failed: Math.max(0, Number(progress?.toolCounts?.failed) || fallbackCounts.failed),
+  };
   return {
     status,
     throughOffset: Number.isFinite(progress?.throughOffset) ? progress.throughOffset : null,
@@ -76,6 +90,7 @@ function normalizeProgress(progress, status = "running") {
     providerSessionId: progress?.providerSessionId || null,
     reasoning,
     tools,
+    toolCounts,
     lastAssistantMessage: boundedText(progress?.lastAssistantMessage || "", 8000),
     lastError: boundedText(progress?.lastError || "", MAX_TOOL_ERROR_CHARS) || null,
   };
@@ -84,16 +99,21 @@ function normalizeProgress(progress, status = "running") {
 function summarizeProgress(progress, status = "running", normalizedProgress = null) {
   const normalized = normalizedProgress || normalizeProgress(progress, status);
   const lines = [];
+  const { successful, failed } = normalized.toolCounts;
+  const countText = successful + failed === 0 ? ""
+    : failed > 0 ? ` (${successful}/🔴${failed})` : ` (${successful})`;
   if (status === "completed") lines.push("Completed.");
   else if (["failed", "interrupted"].includes(status)) lines.push(status === "failed" ? "Stopped with an error." : "Interrupted.");
-  else lines.push("Working.");
-  if (normalized.reasoning.length > 0) lines.push(normalized.reasoning.at(-1));
-  else if (status === "running" && normalized.lastAssistantMessage) lines.push(normalized.lastAssistantMessage);
+  else lines.push(`Working.${countText}`);
+  if (normalized.reasoning.length > 0) lines.push(`Current: ${boundedText(normalized.reasoning.at(-1), 180)}`);
+  else if (status === "running" && normalized.lastAssistantMessage) {
+    lines.push(`Current: ${boundedText(normalized.lastAssistantMessage, 180)}`);
+  }
   if (normalized.tools.length > 0) {
-    lines.push(`Recent tools: ${normalized.tools.map((tool) => {
-      const marker = tool.success === true ? "ok" : tool.success === false ? "failed" : "running";
-      return `${tool.tool} (${marker})`;
-    }).join(", ")}`);
+    const tool = normalized.tools[0];
+    const marker = tool.success === true ? "ok"
+      : tool.success === false ? `🔴 failed${tool.error ? `: ${boundedText(tool.error, 100)}` : ""}` : "running";
+    lines.push(`Last tool: ${tool.tool}${tool.detail ? ` — ${tool.detail}` : ""} (${marker})`);
   }
   if (normalized.lastError) lines.push(`Error: ${normalized.lastError}`);
   const summary = lines.join("\n").trim();

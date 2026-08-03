@@ -135,6 +135,7 @@ function publicProgress(progress, status = "running") {
     lastError: normalized.lastError,
     reasoning: normalized.reasoning,
     toolUses: normalized.tools.map((tool) => ({ ...tool })),
+    toolCounts: { ...normalized.toolCounts },
     summary: summarizeProgress(progress, status, normalized),
     artifactPath: normalized.artifactPath,
     throughOffset: normalized.throughOffset,

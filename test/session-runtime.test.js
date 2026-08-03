@@ -122,9 +122,11 @@ test("independent Claude and Codex sessions serialize their own submissions", as
   assert.deepEqual(claudeToolDone.progress.toolUses[0], {
     id: "tool-mock",
     tool: "Bash",
+    detail: "true",
     success: true,
     error: null,
   });
+  assert.deepEqual(claudeToolDone.progress.toolCounts, { successful: 1, failed: 0 });
 
   const codexTool = await sessions.submit("delegate:one", { message: "TOOL success" });
   const codexToolDone = await waitFor(async () => {
@@ -134,9 +136,11 @@ test("independent Claude and Codex sessions serialize their own submissions", as
   assert.deepEqual(codexToolDone.progress.toolUses[0], {
     id: "call-mock",
     tool: "exec",
+    detail: "true",
     success: true,
     error: null,
   });
+  assert.deepEqual(codexToolDone.progress.toolCounts, { successful: 1, failed: 0 });
 
   const originalUpdateTurn = sessions.workspaceState.updateTurn.bind(sessions.workspaceState);
   const originalFinishTurn = sessions.workspaceState.finishTurn.bind(sessions.workspaceState);

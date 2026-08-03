@@ -10,6 +10,7 @@ const { OpenAIHelper } = require("../src/openai-helper");
 
 test("OpenAI navigation defaults to GPT-5.6 Luna", () => {
   const config = loadConfig({ HOME: "/tmp" });
+  assert.equal(config.telegram.statusEditIntervalMs, 5000);
   assert.equal(config.openai.navigatorModel, "gpt-5.6-luna");
 });
 

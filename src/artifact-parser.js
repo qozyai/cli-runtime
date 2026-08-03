@@ -67,12 +67,58 @@ function codexExitCode(payload, output) {
       if (Number.isInteger(Number(value))) return Number(value);
     }
   } catch {}
+  const nested = [payload?.output, payload?.content].flat(Infinity);
+  for (const item of nested) {
+    const candidate = typeof item === "string" ? item : item?.text ?? item?.content;
+    if (typeof candidate !== "string") continue;
+    for (const line of candidate.split(/\r?\n/)) {
+      try {
+        const parsed = JSON.parse(line);
+        for (const value of [parsed?.exit_code, parsed?.exitCode, parsed?.metadata?.exit_code, parsed?.metadata?.exitCode]) {
+          if (Number.isInteger(Number(value))) return Number(value);
+        }
+      } catch {}
+    }
+  }
   const matches = [...text.matchAll(/\b(?:process|command|script)\s+exited with code\s+(-?\d+)\b/gi)];
   return matches.length > 0 ? Number(matches.at(-1)[1]) : null;
 }
 
 function authFailure(value) {
   return /(?:\b401\b|\bunauthenticated\b|authentication[_ ]failed|authentication credentials|not logged in|login (?:required|expired)|please run \/login|authorization required|invalid (?:api key|token))/i.test(String(value || ""));
+}
+
+function compactDetail(value) {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, 1000);
+}
+
+function argumentObject(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value;
+  if (typeof value !== "string") return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function embeddedExecCommand(value) {
+  if (typeof value !== "string") return "";
+  const match = value.match(/(?:\bcmd|"cmd")\s*:\s*("(?:\\.|[^"\\])*")/s);
+  if (!match) return "";
+  try { return JSON.parse(match[1]); } catch { return ""; }
+}
+
+function toolDetail(name, value) {
+  const args = argumentObject(value);
+  for (const key of ["description", "file_path", "path", "url", "query", "pattern", "command", "cmd"]) {
+    if (typeof args?.[key] === "string" && args[key].trim()) return compactDetail(args[key]);
+  }
+  const embedded = embeddedExecCommand(value);
+  if (embedded) return compactDetail(embedded);
+  if (["Bash", "exec"].includes(String(name || "")) && typeof value === "string") return compactDetail(value);
+  return "";
 }
 
 function createArtifactParser({ driver, marker }) {
@@ -84,6 +130,7 @@ function createArtifactParser({ driver, marker }) {
     lastError: null,
     reasoning: [],
     toolUses: [],
+    toolCounts: { successful: 0, failed: 0 },
   };
 
   function addReasoning(value) {
@@ -107,7 +154,18 @@ function createArtifactParser({ driver, marker }) {
       lastError: state.lastError,
       reasoning: state.reasoning.slice(-20),
       toolUses: state.toolUses.slice(-20),
+      toolCounts: { ...state.toolCounts },
     };
+  }
+
+  function setToolOutcome(tool, success, error = null) {
+    if (!tool) return;
+    if (tool.success === true) state.toolCounts.successful -= 1;
+    if (tool.success === false) state.toolCounts.failed -= 1;
+    tool.success = success;
+    tool.error = success ? null : error || "tool failed";
+    if (success) state.toolCounts.successful += 1;
+    else state.toolCounts.failed += 1;
   }
 
   function terminal({ ok, reply = state.lastAssistantMessage, error = state.lastError, kind = null }) {
@@ -134,8 +192,7 @@ function createArtifactParser({ driver, marker }) {
         if (block?.type !== "tool_result") continue;
         const tool = findTool(block.tool_use_id);
         if (!tool) continue;
-        tool.success = block.is_error !== true;
-        tool.error = block.is_error === true ? resultText(block.content) || "tool failed" : null;
+        setToolOutcome(tool, block.is_error !== true, resultText(block.content));
       }
     }
 
@@ -148,6 +205,7 @@ function createArtifactParser({ driver, marker }) {
           id: block.id || null,
           tool: String(block.name || "unknown"),
           arguments: block.input ?? null,
+          detail: toolDetail(block.name, block.input),
           success: null,
           error: null,
         });
@@ -198,6 +256,7 @@ function createArtifactParser({ driver, marker }) {
         id: payload.call_id || payload.id || null,
         tool: String(payload.name || "unknown"),
         arguments: payload.arguments ?? payload.input ?? null,
+        detail: toolDetail(payload.name, payload.arguments ?? payload.input),
         success: null,
         error: null,
       });
@@ -209,8 +268,7 @@ function createArtifactParser({ driver, marker }) {
         const exitCode = codexExitCode(payload, output);
         const explicitFailure = payload.success === false || payload.status === "failed" || payload.status === "error";
         const failed = explicitFailure || (exitCode !== null && exitCode !== 0);
-        tool.success = !failed;
-        tool.error = failed ? output || `tool exited with code ${exitCode}` : null;
+        setToolOutcome(tool, !failed, output || `tool exited with code ${exitCode}`);
       }
     }
     if (entry?.type === "event_msg") {

@@ -72,6 +72,80 @@ test("Codex parser uses exact command exit wrappers", () => {
   assert.equal(progress.toolUses[0].success, false);
   assert.match(progress.toolUses[0].error, /exited with code 2/);
   assert.equal(progress.toolUses[1].success, true);
+  assert.deepEqual(progress.toolCounts, { successful: 1, failed: 1 });
+  assert.equal(progress.toolUses[1].detail, "true");
+  parser.feed({
+    type: "response_item",
+    payload: { type: "function_call_output", call_id: "two", output: "duplicate result" },
+  });
+  assert.deepEqual(parser.state.toolCounts, { successful: 1, failed: 1 });
+});
+
+test("Codex parser reads structured exit codes from code-mode output blocks", () => {
+  const marker = "<marker-codex-structured/>";
+  const parser = createArtifactParser({ driver: "codex", marker });
+  parser.feed({ type: "event_msg", payload: { type: "user_message", message: marker } });
+  parser.feed({
+    type: "response_item",
+    payload: {
+      type: "custom_tool_call",
+      call_id: "structured-failure",
+      name: "exec",
+      input: 'const r = await tools.exec_command({"cmd":"sh -c \'exit 7\'","workdir":"/tmp"});',
+    },
+  });
+  const progress = parser.feed({
+    type: "response_item",
+    payload: {
+      type: "custom_tool_call_output",
+      call_id: "structured-failure",
+      output: [
+        { type: "input_text", text: "Script completed\nWall time 0.0 seconds\nOutput:\n" },
+        { type: "input_text", text: '{"output":"","exit_code":7}' },
+      ],
+    },
+  });
+  assert.deepEqual(progress.toolCounts, { successful: 0, failed: 1 });
+  assert.equal(progress.toolUses[0].success, false);
+  assert.equal(progress.toolUses[0].detail, "sh -c 'exit 7'");
+  assert.match(progress.toolUses[0].error, /exit_code/);
+});
+
+test("Claude parser retains descriptions, one safe detail source, and cumulative outcomes", () => {
+  const marker = "<marker-claude-tools/>";
+  const parser = createArtifactParser({ driver: "claude", marker });
+  parser.feed(claudeUser(marker));
+  parser.feed({
+    type: "assistant",
+    message: {
+      content: [{
+        type: "tool_use",
+        id: "bash-one",
+        name: "Bash",
+        input: { command: "npm test", description: "Run the complete test suite" },
+      }],
+      stop_reason: "tool_use",
+    },
+  });
+  parser.feed({
+    type: "user",
+    message: { content: [{ type: "tool_result", tool_use_id: "bash-one", content: "", is_error: false }] },
+  });
+  parser.feed({
+    type: "assistant",
+    message: {
+      content: [{ type: "tool_use", id: "read-two", name: "Read", input: { file_path: "/tmp/report.md" } }],
+      stop_reason: "tool_use",
+    },
+  });
+  const progress = parser.feed({
+    type: "user",
+    message: { content: [{ type: "tool_result", tool_use_id: "read-two", content: "permission denied", is_error: true }] },
+  });
+  assert.deepEqual(progress.toolCounts, { successful: 1, failed: 1 });
+  assert.equal(progress.toolUses[0].detail, "Run the complete test suite");
+  assert.equal(progress.toolUses[1].detail, "/tmp/report.md");
+  assert.equal(progress.toolUses[1].success, false);
 });
 
 test("artifact watcher preserves UTF-8 split across poll reads", async (t) => {

@@ -199,7 +199,7 @@ class TelegramAdapter {
       if (TERMINAL_SUBMISSION_STATES.has(status)) return result.submission;
       const summary = String(result.submission.progress?.summary || "Working.").trim();
       if (summary && summary !== lastSummary
-        && Date.now() - lastEditAt >= (this.config.telegram.statusEditIntervalMs || 30_000)) {
+        && Date.now() - lastEditAt >= (this.config.telegram.statusEditIntervalMs || 5000)) {
         await this.editStatus(message, statusMessageId, summary);
         lastSummary = summary;
         lastEditAt = Date.now();
