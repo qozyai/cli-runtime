@@ -16,6 +16,8 @@ const { baselineArtifacts, publicProgress, watchArtifacts } = require("./artifac
 const { createId, nowIso, readJson, safeId, sleep, sleepWithSignal, tailText, writeAtomic } = require("./util");
 const { WorkspaceState } = require("./workspace-state");
 
+const PROMPT_PASTE_SETTLE_MS = 150;
+
 function publicSession(session) {
   return {
     version: 1,
@@ -627,6 +629,8 @@ class SessionManager {
       );
       // tmux can finish writing before a busy TUI has consumed the bracketed paste.
       await this.waitForPromptEcho(session, submission.marker, controller.signal);
+      // Codex suppresses Enter briefly after paste activity so embedded newlines are not submitted.
+      await sleepWithSignal(PROMPT_PASTE_SETTLE_MS, controller.signal);
       await this.confirmSubmission(session, observed, controller.signal);
       activeRuntime.phase = "running";
       session.status = "running";

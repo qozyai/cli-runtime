@@ -440,7 +440,7 @@ test("submission waits for the pasted marker to reach the terminal before Enter"
     return value?.status === "completed" ? value : null;
   }, 9000);
   assert.match(done.reply, /VOICE/);
-  assert.ok(enteredAt - pastedAt >= 250, `Enter was sent after only ${enteredAt - pastedAt}ms`);
+  assert.ok(enteredAt - pastedAt >= 400, `Enter was sent after only ${enteredAt - pastedAt}ms`);
 });
 
 test("closing during preparation waits for interruption and leaves a terminal submission", async (t) => {
