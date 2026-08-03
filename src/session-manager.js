@@ -6,7 +6,7 @@ const crypto = require("node:crypto");
 const {
   artifactRoot,
   buildLaunch,
-  isPromptStillEditable,
+  isPastedPromptEditable,
   isReady,
   isStartupAuthScreen,
   normalizeDriver,
@@ -557,7 +557,7 @@ class SessionManager {
     });
   }
 
-  async confirmSubmission(session, submission, observed, signal) {
+  async confirmSubmission(session, submission, observed, evidence, signal) {
     await this.tmux.sendKey(session.tmuxSessionName, "Enter");
     const startedAt = Date.now();
     const deadline = startedAt + (this.config.bindTimeoutMs || 15_000);
@@ -575,7 +575,7 @@ class SessionManager {
         const cursorLine = typeof this.tmux.cursorLine === "function"
           ? await this.tmux.cursorLine(session.tmuxSessionName).catch(() => "")
           : "";
-        if (isPromptStillEditable(session.driver, screen, cursorLine, submission.submissionId.slice(-8))) {
+        if (isPastedPromptEditable(session.driver, screen, cursorLine, evidence)) {
           retried = true;
           await this.eventStore.append("submission.submit_retry", {
             sessionKey: session.sessionKey,
@@ -589,12 +589,16 @@ class SessionManager {
     throw new Error("driver did not accept prompt before bind timeout");
   }
 
-  async waitForPromptEcho(session, markerToken, signal) {
+  async waitForPromptEcho(session, evidence, signal) {
     const deadline = Date.now() + Math.min(this.config.bindTimeoutMs || 15_000, PROMPT_ECHO_TIMEOUT_MS);
     while (Date.now() < deadline) {
       if (signal.aborted) throw new Error("submission interrupted");
       const screen = await this.tmux.capture(session.tmuxSessionName, 40);
-      if (screen.includes(markerToken)) return screen;
+      if (screen.includes(evidence.markerToken)) return screen;
+      if (/\[Pasted (?:Content|text)/.test(screen) && typeof this.tmux.cursorLine === "function") {
+        const cursorLine = await this.tmux.cursorLine(session.tmuxSessionName).catch(() => "");
+        if (isPastedPromptEditable(session.driver, screen, cursorLine, evidence)) return screen;
+      }
       const state = await this.tmux.driverState(session.tmuxSessionName);
       if (state.paneDead) {
         throw new Error(`driver exited (${state.exitCode ?? "unknown"}) before accepting prompt`);
@@ -690,6 +694,15 @@ class SessionManager {
       terminalPromise = this.monitorDriverProcess(session, monitorController.signal);
       terminalPromise.catch(() => {});
       await this.tmux.sendKey(session.tmuxSessionName, "C-u");
+      const beforePasteCursorLine = typeof this.tmux.cursorLine === "function"
+        ? await this.tmux.cursorLine(session.tmuxSessionName).catch(() => "")
+        : "";
+      const pasteEvidence = {
+        beforePasteCursorLine,
+        expectedChars: Array.from(delivery.terminalPrompt).length,
+        markerTail: submission.submissionId.slice(-8),
+        markerToken: submission.submissionId,
+      };
       const terminalPromptPath = `${promptPath}.submit`;
       await fs.writeFile(terminalPromptPath, delivery.terminalPrompt, { encoding: "utf8", mode: 0o600 });
       try {
@@ -702,10 +715,10 @@ class SessionManager {
         await fs.rm(terminalPromptPath, { force: true });
       }
       // tmux can finish writing before a busy TUI has consumed the bracketed paste.
-      await this.waitForPromptEcho(session, submission.submissionId, controller.signal);
+      await this.waitForPromptEcho(session, pasteEvidence, controller.signal);
       // TUIs may briefly suppress Enter while consuming a bracketed paste.
       await sleepWithSignal(PROMPT_PASTE_SETTLE_MS, controller.signal);
-      await this.confirmSubmission(session, submission, observed, controller.signal);
+      await this.confirmSubmission(session, submission, observed, pasteEvidence, controller.signal);
       activeRuntime.phase = "running";
       session.status = "running";
       await this.persistSession(session);

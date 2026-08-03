@@ -75,9 +75,22 @@ function isReady(driver, screen) {
   return hasPromptCandidate(recent, "›");
 }
 
-function isPromptStillEditable(driver, screen, cursorLine, markerTail) {
-  if (!String(cursorLine || "").includes(String(markerTail || ""))) return false;
-  return isReady(driver, screen);
+function isCollapsedPasteReceipt(driver, cursorLine, expectedChars) {
+  const line = String(cursorLine || "").trim();
+  if (driver === "codex") {
+    const match = line.match(/^›\s*\[Pasted Content (\d+) chars\]\s*$/u);
+    return Boolean(match) && Number(match[1]) === expectedChars;
+  }
+  if (driver === "claude") return /^❯\s*\[Pasted text #\d+\]\s*$/u.test(line);
+  return false;
+}
+
+function isPastedPromptEditable(driver, screen, cursorLine, evidence) {
+  if (!isReady(driver, screen)) return false;
+  const markerTail = String(evidence.markerTail || "");
+  if (markerTail && String(cursorLine || "").includes(markerTail)) return true;
+  if (String(cursorLine || "") === String(evidence.beforePasteCursorLine || "")) return false;
+  return isCollapsedPasteReceipt(driver, cursorLine, evidence.expectedChars);
 }
 
 function isStartupAuthScreen(driver, screen) {
@@ -127,7 +140,8 @@ module.exports = {
   driverConfig,
   driverExit,
   isAuthRequired,
-  isPromptStillEditable,
+  isCollapsedPasteReceipt,
+  isPastedPromptEditable,
   isReady,
   isStartupAuthScreen,
   normalizeDriver,

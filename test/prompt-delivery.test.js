@@ -8,6 +8,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { EventStore } = require("../src/event-store");
 const { buildPromptDelivery, MAX_INLINE_PROMPT_BYTES, SessionManager } = require("../src/session-manager");
+const { isCollapsedPasteReceipt, isPastedPromptEditable } = require("../src/drivers");
 const { Tmux } = require("../src/tmux");
 
 async function waitFor(fn, timeoutMs = 10_000) {
@@ -77,6 +78,41 @@ test("prompt delivery keeps exact bytes and uses private files for unsafe termin
   }
 });
 
+test("collapsed paste receipts are validated using each driver's own format", () => {
+  assert.equal(isCollapsedPasteReceipt("codex", "› [Pasted Content 17 chars]", 17), true);
+  assert.equal(isCollapsedPasteReceipt("codex", "› [Pasted Content 18 chars]", 17), false);
+  assert.equal(isCollapsedPasteReceipt("codex", "old › [Pasted Content 17 chars]", 17), false);
+  assert.equal(isCollapsedPasteReceipt("claude", "❯\u00a0[Pasted text #12]", 999), true);
+  assert.equal(isCollapsedPasteReceipt("claude", "❯ [Pasted text]", 999), false);
+  assert.equal(isCollapsedPasteReceipt("claude", "old ❯ [Pasted text #12]", 999), false);
+});
+
+test("collapsed paste evidence must be new and on the active input line", () => {
+  const evidence = {
+    beforePasteCursorLine: "› ",
+    expectedChars: 17,
+    markerTail: "marker42",
+  };
+  assert.equal(isPastedPromptEditable(
+    "codex",
+    "old output [Pasted Content 17 chars]\n› ",
+    "› ",
+    evidence,
+  ), false);
+  assert.equal(isPastedPromptEditable(
+    "codex",
+    "› [Pasted Content 17 chars]",
+    "› [Pasted Content 17 chars]",
+    evidence,
+  ), true);
+  assert.equal(isPastedPromptEditable(
+    "codex",
+    "› [Pasted Content 18 chars]",
+    "› [Pasted Content 18 chars]",
+    evidence,
+  ), false);
+});
+
 for (const driver of ["claude", "codex"]) {
   test(`${driver} preserves complex prompts through a real tmux session`, async (t) => {
     const { sessions, config, workspace } = await setupRuntime(t, driver);
@@ -115,41 +151,54 @@ for (const driver of ["claude", "codex"]) {
   });
 }
 
-test("submission retries only when the marker remains at the active cursor", async (t) => {
-  const workspaceState = {
-    ensure: async () => {},
-    startTurn: async () => ({ inputs: [], promptContext: "" }),
-    updateTurn: async () => null,
-    finishTurn: async () => ({ outputs: [], outputError: null }),
-  };
-  const { sessions, tmux, eventStore } = await setupRuntime(t, "codex", "retry", workspaceState);
-  const originalSendKey = tmux.sendKey.bind(tmux);
-  let enters = 0;
-  let ignoreFirst = false;
-  const originalPasteFile = tmux.pasteFile.bind(tmux);
-  tmux.pasteFile = async (...args) => {
-    await originalPasteFile(...args);
-    ignoreFirst = true;
-  };
-  tmux.sendKey = async (sessionName, key) => {
-    if (key === "Enter" && ignoreFirst) {
-      enters += 1;
-      ignoreFirst = false;
-      return;
-    }
-    if (key === "Enter") enters += 1;
-    return originalSendKey(sessionName, key);
-  };
-  const accepted = await sessions.submit("codex:main", { message: "retry one ignored submit" });
-  const done = await waitFor(async () => {
-    const value = await sessions.getSubmission(accepted.submissionId);
-    return value?.status === "completed" ? value : null;
-  }, 9000);
-  assert.match(done.reply, /retry one ignored submit/);
-  assert.equal(enters, 2);
-  const events = await eventStore.read({ after: 0, sessionKey: "codex:main" });
-  assert.equal(events.filter((event) => event.type === "submission.submit_retry").length, 1);
-});
+for (const driver of ["claude", "codex"]) {
+  test(`${driver} retries a collapsed pasted prompt only while it remains editable`, async (t) => {
+    const workspaceState = {
+      ensure: async () => {},
+      startTurn: async () => ({ inputs: [], promptContext: "" }),
+      updateTurn: async () => null,
+      finishTurn: async () => ({ outputs: [], outputError: null }),
+    };
+    const { sessions, tmux, eventStore } = await setupRuntime(t, driver, "retry", workspaceState);
+    const originalSendKey = tmux.sendKey.bind(tmux);
+    const originalCapture = tmux.capture.bind(tmux);
+    const originalCursorLine = tmux.cursorLine.bind(tmux);
+    let enters = 0;
+    let collapsed = false;
+    let expectedChars = 0;
+    const originalPasteFile = tmux.pasteFile.bind(tmux);
+    tmux.pasteFile = async (...args) => {
+      expectedChars = Array.from(await fs.readFile(args[1], "utf8")).length;
+      await originalPasteFile(...args);
+      collapsed = true;
+    };
+    const receipt = () => driver === "codex"
+      ? `› [Pasted Content ${expectedChars} chars]`
+      : "❯\u00a0[Pasted text #7]";
+    tmux.capture = async (...args) => collapsed ? receipt() : originalCapture(...args);
+    tmux.cursorLine = async (...args) => collapsed ? receipt() : originalCursorLine(...args);
+    tmux.sendKey = async (sessionName, key) => {
+      if (key === "Enter" && enters === 0) {
+        enters += 1;
+        return;
+      }
+      if (key === "Enter") {
+        enters += 1;
+        collapsed = false;
+      }
+      return originalSendKey(sessionName, key);
+    };
+    const accepted = await sessions.submit(`${driver}:main`, { message: "retry one ignored submit" });
+    const done = await waitFor(async () => {
+      const value = await sessions.getSubmission(accepted.submissionId);
+      return value?.status === "completed" ? value : null;
+    }, 9000);
+    assert.match(done.reply, /retry one ignored submit/);
+    assert.equal(enters, 2);
+    const events = await eventStore.read({ after: 0, sessionKey: `${driver}:main` });
+    assert.equal(events.filter((event) => event.type === "submission.submit_retry").length, 1);
+  });
+}
 
 test("submission fails without pressing Enter when pasted content never appears", async (t) => {
   const { sessions, tmux, config } = await setupRuntime(t, "claude", "missing-echo");
@@ -194,8 +243,13 @@ test("visual echo accepts a wrapped marker when its unique ID remains intact", a
     workspaceState: {},
   });
   const screen = await manager.waitForPromptEcho(
-    { tmuxSessionName: "wrapped" },
-    "sub_wrapped_123",
+    { driver: "claude", tmuxSessionName: "wrapped" },
+    {
+      beforePasteCursorLine: "❯ ",
+      expectedChars: 10,
+      markerTail: "pped_123",
+      markerToken: "sub_wrapped_123",
+    },
     new AbortController().signal,
   );
   assert.match(screen, /sub_wrapped_123/);
