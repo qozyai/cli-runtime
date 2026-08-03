@@ -6,7 +6,8 @@ const MAX_REASONING_CHUNKS = 3;
 const MAX_TOOL_USES = 1;
 const MAX_REASONING_CHARS = 2000;
 const MAX_TOOL_ERROR_CHARS = 4000;
-const MAX_STATUS_CHARS = 500;
+const MAX_STATUS_CHARS = 900;
+const MAX_COMMENTARY_CHARS = 300;
 const MAX_HISTORY_MESSAGE_CHARS = 40_000;
 
 const MIME_BY_EXTENSION = new Map([
@@ -105,9 +106,8 @@ function summarizeProgress(progress, status = "running", normalizedProgress = nu
   if (status === "completed") lines.push("Completed.");
   else if (["failed", "interrupted"].includes(status)) lines.push(status === "failed" ? "Stopped with an error." : "Interrupted.");
   else lines.push(`Working.${countText}`);
-  if (normalized.reasoning.length > 0) lines.push(`Current: ${boundedText(normalized.reasoning.at(-1), 180)}`);
-  else if (status === "running" && normalized.lastAssistantMessage) {
-    lines.push(`Current: ${boundedText(normalized.lastAssistantMessage, 180)}`);
+  if (status === "running" && normalized.lastAssistantMessage) {
+    lines.push(boundedText(normalized.lastAssistantMessage, MAX_COMMENTARY_CHARS));
   }
   if (normalized.tools.length > 0) {
     const tool = normalized.tools[0];

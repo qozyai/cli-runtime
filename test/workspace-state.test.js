@@ -204,12 +204,14 @@ test("normalized progress omits tool arguments and preserves one tool identity s
   assert.deepEqual(normalized.toolCounts, { successful: 10, failed: 3 });
   assert.doesNotMatch(JSON.stringify(normalized), /api_key|secret|token=hidden/);
   const summary = summarizeProgress({
+    reasoning: ["Internal reasoning should not be displayed."],
     lastAssistantMessage: "Checking the release.",
     toolCounts: { successful: 10, failed: 3 },
     toolUses: [{ id: "call-1", tool: "exec", detail: "git diff --check", success: false, error: "failed" }],
   });
   assert.match(summary, /^Working\. \(10\/🔴3\)$/m);
-  assert.match(summary, /^Current: Checking the release\.$/m);
+  assert.match(summary, /^Checking the release\.$/m);
+  assert.doesNotMatch(summary, /Internal reasoning/);
   assert.match(summary, /^Last tool: exec — git diff --check \(🔴 failed: failed\)$/m);
   assert.doesNotMatch(summary, /Recent tools/);
 });
