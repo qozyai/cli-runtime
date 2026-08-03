@@ -32,7 +32,7 @@ function historyUserText(message, inputDescriptors = []) {
   const parts = [String(message || "").trim()].filter(Boolean);
   for (const input of inputDescriptors) {
     if (typeof input?.transcript === "string" && input.transcript.trim()) {
-      parts.push(`Voice transcript:\n${input.transcript.trim()}`);
+      parts.push(`Automated voice transcript (may contain recognition errors):\n${input.transcript.trim()}`);
     }
   }
   return parts.join("\n\n");
@@ -351,7 +351,8 @@ class WorkspaceState {
       }
     }
     if (inputs.some((input) => input.transcriptPath)) {
-      lines.push("For transcribed audio, begin your response with `Voice transcript:` followed by the transcript, then answer the user.");
+      lines.push("The audio transcript is automated and may contain recognition errors. Use the original audio and transcript together to infer the user's intent.");
+      lines.push("Begin your final response with `Here is how I understood your prompt:` followed by a concise, corrected interpretation. Then answer the request.");
     }
     lines.push("</cli-runtime-files>");
     return lines.join("\n");

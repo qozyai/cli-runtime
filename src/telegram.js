@@ -402,9 +402,12 @@ class TelegramAdapter {
       return;
     }
     const inputs = await this.downloadInputs(message);
-    for (const input of inputs) if (input.transcriptionError) await this.send(message, input.transcriptionError);
     let accepted;
     try {
+      for (const input of inputs) {
+        if (input.transcript) await this.send(message, `Your voice transcript:\n${input.transcript}`);
+        if (input.transcriptionError) await this.send(message, input.transcriptionError);
+      }
       accepted = await this.runtime("POST", `/v1/sessions/${encodeURIComponent(this.sessionKey(message))}/submissions`, {
         message: text,
         inputs: inputs.map(({ temporary, transcriptionError, ...input }) => ({ ...input, transcriptionError })),

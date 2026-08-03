@@ -59,6 +59,11 @@ do not lose the substance of audio-only messages. Raw provider artifacts,
 transcripts, and normalized history remain sensitive workspace data even though
 known credential forms are redacted as defense in depth.
 
+When transcription succeeds, Telegram sends the raw automated transcript as a
+separate message. The driver receives both the original audio and transcript,
+is warned that recognition may be imperfect, and is instructed to begin its
+answer with a concise `Here is how I understood your prompt:` interpretation.
+
 Retention uses active work rather than wall-clock gaps:
 
 - a gap of at least six hours starts another work cluster

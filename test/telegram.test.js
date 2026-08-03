@@ -349,6 +349,61 @@ test("Telegram visibly reports transcription failure while submitting original a
   assert.equal(sent.at(-1), "heard");
 });
 
+test("Telegram sends a successful voice transcript separately before submission", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-transcript-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, "voice.ogg");
+  await fs.writeFile(sourcePath, "voice");
+  const adapter = new TelegramAdapter({
+    config: {
+      stateDir: root,
+      socketPath: path.join(root, "runtime.sock"),
+      telegram: { token: "token", defaultDriver: "claude", workspace: root, allowedChatIds: new Set() },
+    },
+    fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true, result: { message_id: 1 } }) }),
+  });
+  await adapter.init();
+  const events = [];
+  let submittedInputs = null;
+  adapter.send = async (_message, text) => { events.push({ type: "message", text }); };
+  adapter.typing = async () => {};
+  adapter.sendStatus = async () => ({ message_id: 1 });
+  adapter.ensureSession = async () => ({ status: "ready" });
+  adapter.downloadInputs = async () => [{
+    sourcePath,
+    name: "voice.ogg",
+    mimeType: "audio/ogg",
+    transcript: "Please publish the café site tomorrow. ✅",
+    transcriptionError: null,
+    temporary: true,
+  }];
+  adapter.runtime = async (method, requestPath, body) => {
+    if (method === "POST" && requestPath.endsWith("/submissions")) {
+      events.push({ type: "submission" });
+      submittedInputs = body.inputs;
+      return { submission: { submissionId: "sub-voice" } };
+    }
+    throw new Error(`unexpected ${method} ${requestPath}`);
+  };
+  adapter.waitSubmission = async () => ({
+    submissionId: "sub-voice",
+    status: "completed",
+    reply: "Here is how I understood your prompt: publish the café site tomorrow.\n\nI will do that.",
+    outputs: [],
+  });
+  adapter.finalizeStatus = async (_message, _messageId, text) => { events.push({ type: "final", text }); };
+
+  await adapter.handle({ chat: { id: 42 }, message_id: 8, voice: { file_id: "voice", file_size: 5, mime_type: "audio/ogg" } });
+  assert.deepEqual(events[0], {
+    type: "message",
+    text: "Your voice transcript:\nPlease publish the café site tomorrow. ✅",
+  });
+  assert.equal(events[1].type, "submission");
+  assert.equal(submittedInputs[0].transcript, "Please publish the café site tomorrow. ✅");
+  assert.match(events.at(-1).text, /^Here is how I understood your prompt:/);
+  await assert.rejects(() => fs.access(sourcePath));
+});
+
 test("Telegram does not report a user interruption as a model error", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-interrupt-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

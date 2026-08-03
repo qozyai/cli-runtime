@@ -54,6 +54,9 @@ test("each submission owns exact inbox and outbox directories with individual de
   }]);
   assert.match(started.inputs[0].path, /\.qozyai\/io\/inbox\/sub_one\/001_voice\.ogg$/);
   assert.match(started.promptContext, /outbox\/sub_one/);
+  assert.match(started.promptContext, /transcript is automated and may contain recognition errors/);
+  assert.match(started.promptContext, /Here is how I understood your prompt:/);
+  assert.doesNotMatch(started.promptContext, /begin your response with `Voice transcript:`/i);
   const outbox = state.turnPaths(workspace, "sub_one").turnOutbox;
   await fs.writeFile(path.join(outbox, "answer.txt"), "answer");
   await fs.writeFile(path.join(outbox, "second.txt"), "second");
