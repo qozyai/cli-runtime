@@ -15,6 +15,8 @@ policy. A caller represents each independent execution lane with a session key.
 - one active submission per session; independent sessions remain concurrent
 - vendor JSONL artifacts, not terminal text, decide turn completion
 - terminal text is used only before submission for readiness, auth, and recovery
+- each turn clears and probes the editable composer before pasting the real prompt
+- multiline, NUL-containing, and over-32-KiB prompts are preserved in a mode-`0600` runtime file and submitted through a short file-reference instruction
 - driver liveness and exit status come from tmux pane lifecycle, not pane text or pane-writable metadata
 - every submission owns exact inbox and outbox directories
 - event replay uses a bounded durable window with explicit cursor expiry

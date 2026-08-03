@@ -43,13 +43,24 @@ function complete(line) {
     else append({ type: "event_msg", payload: { type: "user_message", message: line } });
     return;
   }
-  const reply = `MOCK_${driver.toUpperCase()}: ${clean}`;
+  const indirect = clean.match(/^Read the complete UTF-8 user request from ("(?:[^"\\]|\\.)*") before taking any other action\./);
+  let effective = clean;
+  let reply;
+  if (indirect) {
+    const requestPath = JSON.parse(indirect[1]);
+    effective = fs.readFileSync(requestPath, "utf8");
+    const bytes = Buffer.byteLength(effective, "utf8");
+    const digest = crypto.createHash("sha256").update(effective).digest("hex");
+    reply = `MOCK_${driver.toUpperCase()}_FILE: bytes=${bytes} sha256=${digest}`;
+  } else {
+    reply = `MOCK_${driver.toUpperCase()}: ${clean}`;
+  }
   if (driver === "claude") {
     append({ type: "user", sessionId, message: { role: "user", content: line } });
     append({
       type: "assistant",
       sessionId,
-      message: { role: "assistant", content: [{ type: "thinking", thinking: `Inspecting ${clean}` }], stop_reason: "end_turn" },
+      message: { role: "assistant", content: [{ type: "thinking", thinking: `Inspecting ${effective.slice(0, 200)}` }], stop_reason: "end_turn" },
     });
     if (clean.includes("TOOL")) {
       append({
@@ -70,8 +81,8 @@ function complete(line) {
     });
   } else {
     append({ type: "event_msg", payload: { type: "user_message", message: line } });
-    append({ type: "event_msg", payload: { type: "agent_reasoning", text: `Inspecting ${clean}` } });
-    append({ type: "event_msg", payload: { type: "agent_message", message: `Working on ${clean}` } });
+    append({ type: "event_msg", payload: { type: "agent_reasoning", text: `Inspecting ${effective.slice(0, 200)}` } });
+    append({ type: "event_msg", payload: { type: "agent_message", message: `Working on ${effective.slice(0, 200)}` } });
     if (clean.includes("TOOL")) {
       append({ type: "response_item", payload: { type: "custom_tool_call", call_id: "call-mock", name: "exec", input: "true" } });
       append({ type: "response_item", payload: { type: "custom_tool_call_output", call_id: "call-mock", output: [{ type: "input_text", text: "Script completed" }] } });

@@ -16,13 +16,6 @@ function recentScreen(screen, lines = 60) {
   return parts.slice(-lines).join("\n");
 }
 
-function normalizePrompt(prompt) {
-  return String(prompt || "")
-    .replace(/\r\n/g, "\\n")
-    .replace(/[\r\n]/g, "\\n")
-    .trim();
-}
-
 function hasPromptCandidate(screen, glyph) {
   return String(screen || "").split(/\r?\n/).some((line) => {
     const trimmed = line.trimStart();
@@ -82,6 +75,11 @@ function isReady(driver, screen) {
   return hasPromptCandidate(recent, "›");
 }
 
+function isPromptStillEditable(driver, screen, cursorLine, markerTail) {
+  if (!String(cursorLine || "").includes(String(markerTail || ""))) return false;
+  return isReady(driver, screen);
+}
+
 function isStartupAuthScreen(driver, screen) {
   const text = recentScreen(screen, 16);
   if (driver === "claude") return /Select login method|Opening browser to sign in|Paste code here/i.test(text);
@@ -129,9 +127,9 @@ module.exports = {
   driverConfig,
   driverExit,
   isAuthRequired,
+  isPromptStillEditable,
   isReady,
   isStartupAuthScreen,
   normalizeDriver,
-  normalizePrompt,
   recentScreen,
 };

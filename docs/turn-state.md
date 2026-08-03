@@ -26,6 +26,13 @@ Caller inputs are copied transactionally into the exact inbox and its history
 archive. The prompt names the exact outbox directory. No model-generated hash
 prefix, baseline snapshot, mtime comparison, or filename signature is involved.
 
+The exact assembled prompt is also retained under the daemon's private state
+directory. Single-line prompts up to 32 KiB are bracket-pasted directly after
+an editable-composer probe. Multiline, NUL-containing, and larger prompts are
+left in that mode-`0600` file; the terminal receives only a short instruction
+to read the entire file. This avoids terminal paste ambiguity without adding
+runtime files to the user's workspace.
+
 While work is active, `history/active/<submission-id>.json` contains the latest
 artifact cursor, provider session ID, three bounded reasoning chunks, three tool
 records shaped as `{id, tool, success, error}`, and a 500-character summary.

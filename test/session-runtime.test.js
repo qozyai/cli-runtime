@@ -192,7 +192,7 @@ test("independent Claude and Codex sessions serialize their own submissions", as
     return value?.status === "failed" ? value : null;
   });
   assert.match(hangingDone.error, /did not complete/);
-  assert.equal((await sessions.get("main")).status, "attention_required");
+  await waitFor(async () => (await sessions.get("main")).status === "attention_required");
 
   await sessions.restart("main");
   const exiting = await sessions.submit("main", { message: "EXIT" });

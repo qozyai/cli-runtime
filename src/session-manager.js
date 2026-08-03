@@ -6,10 +6,10 @@ const crypto = require("node:crypto");
 const {
   artifactRoot,
   buildLaunch,
+  isPromptStillEditable,
   isReady,
   isStartupAuthScreen,
   normalizeDriver,
-  normalizePrompt,
   recentScreen,
 } = require("./drivers");
 const { baselineArtifacts, publicProgress, watchArtifacts } = require("./artifacts");
@@ -17,6 +17,33 @@ const { createId, nowIso, readJson, safeId, sleep, sleepWithSignal, tailText, wr
 const { WorkspaceState } = require("./workspace-state");
 
 const PROMPT_PASTE_SETTLE_MS = 150;
+const PROMPT_ECHO_TIMEOUT_MS = 10_000;
+const MAX_INLINE_PROMPT_BYTES = 32 * 1024;
+const SUBMISSION_RETRY_AFTER_MS = 3000;
+
+function buildPromptDelivery({ prompt, inlinePrompt = prompt, promptPath, marker }) {
+  const exactPrompt = String(prompt || "");
+  const inlineSource = String(inlinePrompt || "");
+  const fileMode = Buffer.byteLength(exactPrompt, "utf8") > MAX_INLINE_PROMPT_BYTES || /[\r\n\0]/.test(inlineSource);
+  if (!fileMode) {
+    const terminalText = exactPrompt.replace(/\r\n/g, "\\n").replace(/[\r\n]/g, "\\n");
+    return {
+      mode: "inline",
+      storedPrompt: exactPrompt,
+      terminalPrompt: terminalText ? `${terminalText} ${marker}` : marker,
+    };
+  }
+  return {
+    mode: "file",
+    storedPrompt: exactPrompt,
+    terminalPrompt: [
+      `Read the complete UTF-8 user request from ${JSON.stringify(promptPath)} before taking any other action.`,
+      "If needed, read it in chunks. Treat its complete contents as the user's message and follow it.",
+      "Do not modify or delete the request file.",
+      marker,
+    ].join(" "),
+  };
+}
 
 function publicSession(session) {
   return {
@@ -56,6 +83,7 @@ function publicSubmission(submission) {
       deliveredAt: output.deliveredAt || null,
     })),
     outputError: tailText(submission.outputError || "", 4000) || null,
+    promptMode: submission.promptMode || null,
     artifactPath: submission.artifactPath || null,
     artifactStartOffset: Number.isFinite(submission.artifactStartOffset) ? submission.artifactStartOffset : null,
     artifactEndOffset: Number.isFinite(submission.artifactEndOffset) ? submission.artifactEndOffset : null,
@@ -118,8 +146,8 @@ class SessionManager {
   }
 
   async init() {
-    await fs.mkdir(this.sessionsDir, { recursive: true });
-    await fs.mkdir(this.submissionsDir, { recursive: true });
+    await fs.mkdir(this.sessionsDir, { recursive: true, mode: 0o700 });
+    await fs.mkdir(this.submissionsDir, { recursive: true, mode: 0o700 });
     const entries = await fs.readdir(this.sessionsDir, { withFileTypes: true });
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
@@ -338,8 +366,13 @@ class SessionManager {
       screen = await this.tmux.capture(session.tmuxSessionName, 80);
       if (screen.includes(marker)) {
         await this.tmux.sendKey(session.tmuxSessionName, "C-u");
-        await sleep(100);
-        return { ok: true, screen: await this.tmux.capture(session.tmuxSessionName, 80) };
+        const clearDeadline = Date.now() + 1000;
+        while (Date.now() < clearDeadline) {
+          const cleared = await this.tmux.capture(session.tmuxSessionName, 80);
+          if (!cleared.includes(marker) && isReady(session.driver, cleared)) return { ok: true, screen: cleared };
+          await sleep(50);
+        }
+        return { ok: false, error: "terminal input probe could not be cleared", screen };
       }
       await sleep(100);
     }
@@ -443,8 +476,16 @@ class SessionManager {
       });
       if (controller.signal.aborted) throw Object.assign(new Error("submission interrupted"), { code: "SUBMISSION_INTERRUPTED" });
       const userPrompt = prompt || "Review the attached input file(s) and respond appropriately.";
-      const submittedPrompt = `${normalizePrompt(`${userPrompt}${prepared.promptContext}`)} ${marker}`;
+      const promptPath = this.promptPath(session.sessionKey, submissionId);
+      const delivery = buildPromptDelivery({
+        prompt: `${userPrompt}${prepared.promptContext}`,
+        inlinePrompt: userPrompt,
+        promptPath,
+        marker,
+      });
       submission.inputs = prepared.inputs;
+      submission.promptMode = delivery.mode;
+      submission.promptPath = promptPath;
       activeRuntime.phase = "submitting";
       session.status = "submitting";
       await this.persistSubmission(submission);
@@ -452,7 +493,7 @@ class SessionManager {
       activeRuntime.completion = new Promise((resolve) => setImmediate(() => this.executeSubmission(
         session,
         submission,
-        submittedPrompt,
+        delivery,
         activeRuntime,
       ).catch((err) => this.failUnexpectedExecution(session, submission, activeRuntime, err)).finally(resolve)));
       return publicSubmission(submission);
@@ -505,7 +546,8 @@ class SessionManager {
     this.active.delete(session.sessionKey);
     session.activeSubmissionId = null;
     session.lastSubmissionId = submission.submissionId;
-    session.status = status === "interrupted" ? "ready" : "attention_required";
+    session.status = status === "interrupted" ? "ready"
+      : error.code === "AUTH_REQUIRED" ? "auth_required" : "attention_required";
     session.lastError = status === "interrupted" ? null : failure;
     await this.persistSession(session);
     await this.eventStore.append(`submission.${submission.status}`, {
@@ -515,9 +557,12 @@ class SessionManager {
     });
   }
 
-  async confirmSubmission(session, observed, signal) {
+  async confirmSubmission(session, submission, observed, signal) {
     await this.tmux.sendKey(session.tmuxSessionName, "Enter");
-    const deadline = Date.now() + (this.config.bindTimeoutMs || 15_000);
+    const startedAt = Date.now();
+    const deadline = startedAt + (this.config.bindTimeoutMs || 15_000);
+    const retryAt = Math.min(deadline, startedAt + SUBMISSION_RETRY_AFTER_MS);
+    let retried = false;
     while (Date.now() < deadline) {
       if (signal.aborted) throw new Error("submission interrupted");
       if (observed.bound) return;
@@ -525,32 +570,55 @@ class SessionManager {
       if (state.paneDead) {
         throw new Error(`driver exited (${state.exitCode ?? "unknown"}) before accepting prompt`);
       }
+      if (!retried && Date.now() >= retryAt) {
+        const screen = await this.tmux.capture(session.tmuxSessionName, 80);
+        const cursorLine = typeof this.tmux.cursorLine === "function"
+          ? await this.tmux.cursorLine(session.tmuxSessionName).catch(() => "")
+          : "";
+        if (isPromptStillEditable(session.driver, screen, cursorLine, submission.submissionId.slice(-8))) {
+          retried = true;
+          await this.eventStore.append("submission.submit_retry", {
+            sessionKey: session.sessionKey,
+            submissionId: submission.submissionId,
+          });
+          await this.tmux.sendKey(session.tmuxSessionName, "Enter");
+        }
+      }
       await sleep(100);
     }
     throw new Error("driver did not accept prompt before bind timeout");
   }
 
-  async waitForPromptEcho(session, marker, signal) {
-    const deadline = Date.now() + Math.min(this.config.bindTimeoutMs || 15_000, 2000);
+  async waitForPromptEcho(session, markerToken, signal) {
+    const deadline = Date.now() + Math.min(this.config.bindTimeoutMs || 15_000, PROMPT_ECHO_TIMEOUT_MS);
     while (Date.now() < deadline) {
       if (signal.aborted) throw new Error("submission interrupted");
       const screen = await this.tmux.capture(session.tmuxSessionName, 40);
-      if (screen.includes(marker)) return;
+      if (screen.includes(markerToken)) return screen;
       const state = await this.tmux.driverState(session.tmuxSessionName);
       if (state.paneDead) {
         throw new Error(`driver exited (${state.exitCode ?? "unknown"}) before accepting prompt`);
       }
       await sleep(50);
     }
+    throw new Error("pasted prompt marker did not appear in the terminal");
   }
 
-  async executeSubmission(session, submission, submittedPrompt, activeRuntime) {
+  async executeSubmission(session, submission, delivery, activeRuntime) {
     const { controller } = activeRuntime;
+    const promptPath = submission.promptPath || this.promptPath(session.sessionKey, submission.submissionId);
+    const promptDir = path.dirname(promptPath);
+    await fs.mkdir(promptDir, { recursive: true, mode: 0o700 });
+    await fs.chmod(promptDir, 0o700);
+    await fs.writeFile(promptPath, delivery.storedPrompt, { encoding: "utf8", mode: 0o600 });
+    const ready = await this.waitUntilReady(session);
+    if (ready.status !== "ready") {
+      const error = new Error(ready.error || `driver is not ready: ${ready.status}`);
+      if (ready.status === "auth_required") error.code = "AUTH_REQUIRED";
+      throw error;
+    }
     const rootDir = artifactRoot(this.config, session.driver);
     const baseline = await baselineArtifacts(rootDir);
-    const promptPath = this.promptPath(session.sessionKey, submission.submissionId);
-    await fs.mkdir(path.dirname(promptPath), { recursive: true });
-    await fs.writeFile(promptPath, submittedPrompt, { encoding: "utf8", mode: 0o600 });
     submission.status = "running";
     submission.startedAt = nowIso();
     await this.updateWorkspaceTurn({
@@ -622,16 +690,22 @@ class SessionManager {
       terminalPromise = this.monitorDriverProcess(session, monitorController.signal);
       terminalPromise.catch(() => {});
       await this.tmux.sendKey(session.tmuxSessionName, "C-u");
-      await this.tmux.pasteFile(
-        session.tmuxSessionName,
-        promptPath,
-        `prompt-${safeId(submission.submissionId, 16)}`,
-      );
+      const terminalPromptPath = `${promptPath}.submit`;
+      await fs.writeFile(terminalPromptPath, delivery.terminalPrompt, { encoding: "utf8", mode: 0o600 });
+      try {
+        await this.tmux.pasteFile(
+          session.tmuxSessionName,
+          terminalPromptPath,
+          `prompt-${safeId(submission.submissionId, 16)}`,
+        );
+      } finally {
+        await fs.rm(terminalPromptPath, { force: true });
+      }
       // tmux can finish writing before a busy TUI has consumed the bracketed paste.
-      await this.waitForPromptEcho(session, submission.marker, controller.signal);
-      // Codex suppresses Enter briefly after paste activity so embedded newlines are not submitted.
+      await this.waitForPromptEcho(session, submission.submissionId, controller.signal);
+      // TUIs may briefly suppress Enter while consuming a bracketed paste.
       await sleepWithSignal(PROMPT_PASTE_SETTLE_MS, controller.signal);
-      await this.confirmSubmission(session, observed, controller.signal);
+      await this.confirmSubmission(session, submission, observed, controller.signal);
       activeRuntime.phase = "running";
       session.status = "running";
       await this.persistSession(session);
@@ -908,6 +982,8 @@ class SessionManager {
 }
 
 module.exports = {
+  buildPromptDelivery,
+  MAX_INLINE_PROMPT_BYTES,
   SessionManager,
   publicSession,
   publicSubmission,
