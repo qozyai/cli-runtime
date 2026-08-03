@@ -12,6 +12,7 @@ const CONTROL_COMMANDS = new Set(["status", "stop", "reset", "driver"]);
 const IMMEDIATE_COMMANDS = new Set(["status", "stop"]);
 const BARRIER_COMMANDS = new Set(["reset", "driver"]);
 const TELEGRAM_REQUEST_TIMEOUT_MS = 30_000;
+const TELEGRAM_RICH_MESSAGE_LIMIT = 32_768;
 
 function chunks(text, max = 4000) {
   const characters = Array.from(String(text || ""));
@@ -122,10 +123,24 @@ class TelegramAdapter {
     }).catch(() => null);
   }
 
+  async editRichStatus(message, messageId, markdown) {
+    if (!messageId) return null;
+    return this.api("editMessageText", {
+      chat_id: message.chat.id,
+      message_id: messageId,
+      rich_message: { markdown },
+    }).catch(() => null);
+  }
+
   async finalizeStatus(message, messageId, text) {
-    const parts = chunks(text);
+    const value = String(text || "");
+    if (Array.from(value).length <= TELEGRAM_RICH_MESSAGE_LIMIT) {
+      const rich = await this.editRichStatus(message, messageId, value);
+      if (rich) return [rich];
+    }
+    const parts = chunks(value);
     const edited = await this.editStatus(message, messageId, parts[0] || " ");
-    if (!edited) return this.send(message, text);
+    if (!edited) return this.send(message, value);
     for (const part of parts.slice(1)) await this.send(message, part);
     return [edited];
   }

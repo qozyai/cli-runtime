@@ -71,8 +71,10 @@ test("Telegram remains a thin adapter over the runtime API", async (t) => {
   assert.ok(sent.some((text) => text === "Codex selected."));
   assert.ok(telegramCalls.some((call) => call.method === "sendChatAction"));
   const edits = telegramCalls.filter((call) => call.method === "editMessageText");
-  assert.ok(edits.some((call) => call.body.message_id && /MOCK_CLAUDE: hello from Telegram/.test(call.body.text)));
-  assert.ok(edits.some((call) => call.body.message_id && /MOCK_CODEX: hello from Codex/.test(call.body.text)));
+  assert.ok(edits.some((call) => call.body.message_id
+    && /MOCK_CLAUDE: hello from Telegram/.test(call.body.rich_message?.markdown)));
+  assert.ok(edits.some((call) => call.body.message_id
+    && /MOCK_CODEX: hello from Codex/.test(call.body.rich_message?.markdown)));
   assert.equal(chunks("x".repeat(8001)).length, 3);
 });
 
@@ -137,30 +139,43 @@ test("Telegram stages audio and edits one explicit progress message", async (t) 
   assert.equal(edits.some((edit) => edit.text === "Completed."), false);
 });
 
-test("Telegram replaces progress with the final response and safely handles overflow", async () => {
+test("Telegram replaces progress with rich Markdown and safely falls back", async () => {
   const adapter = new TelegramAdapter({
     config: {
       stateDir: "/tmp",
       telegram: { token: "token", defaultDriver: "claude", workspace: "/tmp", allowedChatIds: new Set() },
     },
   });
-  const edits = [];
+  const richEdits = [];
+  const plainEdits = [];
   const sent = [];
+  adapter.editRichStatus = async (_message, messageId, text) => {
+    richEdits.push({ messageId, text });
+    return { message_id: messageId };
+  };
   adapter.editStatus = async (_message, messageId, text) => {
-    edits.push({ messageId, text });
+    plainEdits.push({ messageId, text });
     return { message_id: messageId };
   };
   adapter.send = async (_message, text) => { sent.push(text); };
 
-  await adapter.finalizeStatus({ chat: { id: 42 } }, 777, "x".repeat(8001));
-  assert.deepEqual(edits, [{ messageId: 777, text: "x".repeat(4000) }]);
-  assert.deepEqual(sent.map((text) => text.length), [4000, 1]);
+  const markdown = "# Result\n\n**Done.**\n\n```js\nconsole.log('ok');\n```";
+  await adapter.finalizeStatus({ chat: { id: 42 } }, 777, markdown);
+  assert.deepEqual(richEdits, [{ messageId: 777, text: markdown }]);
+  assert.deepEqual(plainEdits, []);
+  assert.deepEqual(sent, []);
 
-  edits.length = 0;
+  richEdits.length = 0;
+  plainEdits.length = 0;
   sent.length = 0;
-  adapter.editStatus = async () => null;
+  adapter.editRichStatus = async () => null;
   await adapter.finalizeStatus({ chat: { id: 42 } }, 777, "fallback reply");
-  assert.deepEqual(sent, ["fallback reply"]);
+  assert.deepEqual(plainEdits, [{ messageId: 777, text: "fallback reply" }]);
+
+  plainEdits.length = 0;
+  await adapter.finalizeStatus({ chat: { id: 42 } }, 777, "x".repeat(32_769));
+  assert.deepEqual(plainEdits, [{ messageId: 777, text: "x".repeat(4000) }]);
+  assert.deepEqual(sent.map((text) => text.length), [4000, 4000, 4000, 4000, 4000, 4000, 4000, 769]);
 });
 
 test("Telegram does not redeliver outputs that were already acknowledged", async (t) => {
