@@ -27,22 +27,11 @@ prompt() {
   printf '%s' "${result:-$default}"
 }
 
-secret_preview() {
-  local value=$1 length=${#1} hidden suffix=""
-  if (( length <= 2 )); then
-    printf -v hidden '%*s' "$length" ""
-  else
-    printf -v hidden '%*s' "$((length - 2))" ""
-    suffix=${value: -2}
-  fi
-  printf '%s%s' "${hidden// /*}" "$suffix"
-}
-
 read_secret_tty() {
-  local label=$1 hint=$2 result="" char preview stty_state
+  local label=$1 hint=$2 result="" char stty_state
   stty_state=$(stty -g <&"$PROMPT_FD")
   restore_secret_tty() { stty "$stty_state" <&"$PROMPT_FD"; }
-  interrupt_secret_tty() { restore_secret_tty; exit 130; }
+  interrupt_secret_tty() { restore_secret_tty; printf '\n' >&2; exit 130; }
   trap restore_secret_tty EXIT
   trap interrupt_secret_tty INT TERM
   stty -echo -icanon min 1 time 0 <&"$PROMPT_FD"
@@ -50,13 +39,27 @@ read_secret_tty() {
   while IFS= read -r -n 1 -u "$PROMPT_FD" char; do
     [[ -n "$char" ]] || break
     case "$char" in
-      $'\177'|$'\b') [[ -z "$result" ]] || result=${result%?} ;;
-      $'\025') result="" ;;
-      *) result+=$char ;;
+      $'\177'|$'\b')
+        if [[ -n "$result" ]]; then
+          result=${result%?}
+          printf '\b \b' >&2
+        fi
+        ;;
+      $'\025')
+        while [[ -n "$result" ]]; do
+          result=${result%?}
+          printf '\b \b' >&2
+        done
+        ;;
+      *)
+        result+=$char
+        printf '*' >&2
+        ;;
     esac
-    preview=$(secret_preview "$result")
-    printf '\r\033[2K%s%s: %s' "$label" "$hint" "$preview" >&2
   done
+  if (( ${#result} > 2 )); then
+    printf '\b\b%s' "${result: -2}" >&2
+  fi
   restore_secret_tty
   trap - EXIT INT TERM
   printf '\n' >&2
