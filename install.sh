@@ -9,9 +9,11 @@ ENV_FILE="$CONFIG_DIR/runtime.env"
 BIN_DIR="$HOME/.local/bin"
 BIN_PATH="$BIN_DIR/cli-runtime"
 
+PROMPT_IS_TTY=0
 if [[ "${CLI_RUNTIME_INSTALL_INPUT:-tty}" != "stdin" ]] && (: </dev/tty) 2>/dev/null; then
   exec 3</dev/tty
   PROMPT_FD=3
+  PROMPT_IS_TTY=1
 else
   PROMPT_FD=0
 fi
@@ -25,11 +27,55 @@ prompt() {
   printf '%s' "${result:-$default}"
 }
 
+secret_preview() {
+  local value=$1 length=${#1} hidden suffix=""
+  if (( length <= 2 )); then
+    printf -v hidden '%*s' "$length" ""
+  else
+    printf -v hidden '%*s' "$((length - 2))" ""
+    suffix=${value: -2}
+  fi
+  printf '%s%s' "${hidden// /*}" "$suffix"
+}
+
+read_secret_tty() {
+  local label=$1 hint=$2 result="" char preview stty_state
+  stty_state=$(stty -g <&"$PROMPT_FD")
+  restore_secret_tty() { stty "$stty_state" <&"$PROMPT_FD"; }
+  interrupt_secret_tty() { restore_secret_tty; exit 130; }
+  trap restore_secret_tty EXIT
+  trap interrupt_secret_tty INT TERM
+  stty -echo -icanon min 1 time 0 <&"$PROMPT_FD"
+  printf '%s%s: ' "$label" "$hint" >&2
+  while IFS= read -r -n 1 -u "$PROMPT_FD" char; do
+    [[ -n "$char" ]] || break
+    case "$char" in
+      $'\177'|$'\b') [[ -z "$result" ]] || result=${result%?} ;;
+      $'\025') result="" ;;
+      *) result+=$char ;;
+    esac
+    preview=$(secret_preview "$result")
+    printf '\r\033[2K%s%s: %s' "$label" "$hint" "$preview" >&2
+  done
+  restore_secret_tty
+  trap - EXIT INT TERM
+  printf '\n' >&2
+  printf '%s' "$result"
+}
+
 prompt_secret() {
   local label=$1 current=$2 required=$3 result hint=""
-  [[ -n "$current" ]] && hint=" (blank keeps current; - clears)"
-  read -r -s -u "$PROMPT_FD" -p "$label$hint: " result || die "input closed"
-  printf '\n' >&2
+  if [[ -n "$current" && "$required" == "1" ]]; then
+    hint=" (blank keeps current)"
+  elif [[ -n "$current" ]]; then
+    hint=" (blank keeps current; - clears)"
+  fi
+  if [[ "$PROMPT_IS_TTY" == "1" ]]; then
+    result=$(read_secret_tty "$label" "$hint")
+  else
+    read -r -s -u "$PROMPT_FD" -p "$label$hint: " result || die "input closed"
+    printf '\n' >&2
+  fi
   if [[ "$result" == "-" ]]; then
     result=""
   elif [[ -z "$result" ]]; then
@@ -81,7 +127,7 @@ expand_path() {
   node -e 'process.stdout.write(require("node:path").resolve(process.argv[1]))' "$value"
 }
 
-for command_name in git node tmux; do require_command "$command_name"; done
+for command_name in git node stty tmux; do require_command "$command_name"; done
 NODE_MAJOR=$(node -p 'Number(process.versions.node.split(".")[0])')
 (( NODE_MAJOR >= 22 )) || die "Node.js 22 or newer is required (found $(node --version))"
 
