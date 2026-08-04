@@ -180,4 +180,4 @@ Navigator requests omit session keys, contain only a redacted 4,000-character
 pane tail, and use a strict action schema. Navigation is never consulted after
 a submission binds; vendor artifacts remain the completion authority.
 
-See [`docs/turn-state.md`](docs/turn-state.md) for workspace state and retention.
+See [`docs/guides/turn-state.md`](docs/guides/turn-state.md) for workspace state and retention.
