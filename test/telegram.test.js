@@ -306,7 +306,7 @@ test("Telegram sends replied text and media through the runtime to the driver", 
   assert.deepEqual(await fs.readdir(path.join(config.stateDir, "telegram", "inputs")), []);
 });
 
-test("Telegram rejects an oversized replied attachment before submission", async (t) => {
+test("Telegram runs the turn without an oversized replied attachment and says so", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-reply-limit-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const adapter = new TelegramAdapter({
@@ -326,14 +326,20 @@ test("Telegram rejects an oversized replied attachment before submission", async
   await adapter.init();
   await bindRoute(adapter, root);
   adapter.ensureSession = async () => ({ status: "ready" });
-  let submitted = false;
-  adapter.runtime = async () => {
-    submitted = true;
-    throw new Error("submission must not start");
+  const sent = [];
+  adapter.api = async (method, body) => { sent.push({ method, body }); return { message_id: sent.length }; };
+  let submittedMessage = null;
+  adapter.runtime = async (method, urlPath, body) => {
+    if (method === "POST" && urlPath.endsWith("/submissions")) {
+      submittedMessage = body.message;
+      return { submission: { submissionId: "sub-reply-limit" } };
+    }
+    return { submission: { submissionId: "sub-reply-limit", status: "completed", reply: "done", outputs: [] } };
   };
+  adapter.waitSubmission = async () => ({ submissionId: "sub-reply-limit", status: "completed", reply: "done", outputs: [] });
 
   const chat = { id: 42 };
-  await assert.rejects(() => adapter.handle({
+  await adapter.handle({
     chat,
     message_id: 2,
     text: "Inspect the replied file.",
@@ -342,8 +348,13 @@ test("Telegram rejects an oversized replied attachment before submission", async
       message_id: 1,
       document: { file_id: "large", file_name: "large.pdf", file_size: 11, mime_type: "application/pdf" },
     },
-  }), /Could not include replied-to attachment: Telegram file exceeds 10 bytes/);
-  assert.equal(submitted, false);
+  });
+
+  // The enrichment failed; the user's own message is still the work that matters.
+  assert.match(submittedMessage, /Inspect the replied file\./);
+  assert.match(submittedMessage, /Replied-to attachment unavailable: .*exceeds 10 bytes/);
+  assert.ok(sent.some((call) => call.method === "sendMessage"
+    && /Continuing without the replied-to attachment: .*exceeds 10 bytes/.test(String(call.body.text || ""))));
 });
 
 test("Telegram stages audio and edits one explicit progress message", async (t) => {

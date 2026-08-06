@@ -165,7 +165,8 @@ function createServer({ config, sessions, auth, eventStore, ownershipLock = null
           });
         });
         await fs.chmod(config.socketPath, 0o600);
-        await eventStore.append("runtime.started", { socketPath: config.socketPath });
+        // The socket is listening; an unwritable event log must not undo that.
+        eventStore.append("runtime.started", { socketPath: config.socketPath }).catch(() => {});
         return { socketPath: config.socketPath };
       } catch (err) {
         await runtimeLock.release();

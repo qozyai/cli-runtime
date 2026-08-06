@@ -24,6 +24,7 @@ policy. A caller represents each independent execution lane with a session key.
 - event replay uses a bounded durable window with explicit cursor expiry
 - normalized history and file exchange live under `<workspace>/.qozyai`
 - a missing workspace is never recreated implicitly
+- observability, history, and enrichment failures never fail a turn; they warn
 
 Raw provider artifacts and normalized workspace history can contain sensitive
 project data. Tool arguments are excluded from normalized history and events;
@@ -230,11 +231,12 @@ replying to one of the bot's own answers works too, because those are posted as
 rich messages and are flattened back to text. Attachments on the replied-to
 message are downloaded and submitted alongside the new message's own files,
 named `replied-<message-id>-<name>`, and replied-to audio is transcribed under a
-`Replied-to audio transcript:` label. A replied-to attachment larger than
-`CLI_RUNTIME_TELEGRAM_MAX_FILE_BYTES` fails the message before any submission
-starts, so nothing runs on partial context. Replying to a message that carries
-neither text nor attachments, such as a forum's topic-created service message,
-adds no context block.
+`Replied-to audio transcript:` label. A replied-to attachment that cannot be
+fetched — oversized against `CLI_RUNTIME_TELEGRAM_MAX_FILE_BYTES`, or simply
+unavailable — does not stop the turn: the user is told, the reply context records
+what is missing, and the message runs. Replying to a message that carries neither
+text nor attachments, such as a forum's topic-created service message, adds no
+context block.
 
 A restart is announced rather than silent. Whoever restarts the adapter drops a
 one-shot notice in `<state>/telegram/notices/*.json`

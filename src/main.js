@@ -143,7 +143,19 @@ async function runClient(config, args) {
   throw new Error("unknown command; use session, auth, events, daemon, or telegram");
 }
 
+// Node makes an unhandled rejection fatal by default. A long-lived service must not
+// lose every live session to one stray promise in a peripheral path; the process
+// keeps running and the rejection is reported. Uncaught exceptions keep the default
+// behavior, because those unwind a stack we no longer know the state of.
+function installRejectionBackstop(mode) {
+  process.on("unhandledRejection", (reason) => {
+    const detail = reason instanceof Error ? `${reason.message}\n${reason.stack || ""}` : String(reason);
+    process.stderr.write(`[cli-runtime] unhandled rejection in ${mode}: ${detail}\n`);
+  });
+}
+
 async function runService(mode) {
+  installRejectionBackstop(mode);
   if (mode === "telegram") {
     const config = loadConfig(process.env, { requireTelegramProjectsRoot: true });
     const adapterLock = await acquireRuntimeLock(path.join(config.stateDir, "telegram"));
@@ -190,4 +202,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createRuntime, main, parseSendArguments, runClient, waitForSubmission };
+module.exports = { createRuntime, installRejectionBackstop, main, parseSendArguments, runClient, waitForSubmission };

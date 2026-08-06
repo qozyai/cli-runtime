@@ -108,6 +108,14 @@ class SessionManager {
     this.mutationChains = new Map();
   }
 
+  // Observability never decides whether a turn survives. Events are appended off the
+  // awaited path so a full disk or a torn event file cannot fail live work.
+  note(type, details = {}) {
+    this.eventStore.append(type, details).catch((err) => {
+      process.stderr.write(`[cli-runtime] event append failed (${type}): ${err.message}\n`);
+    });
+  }
+
   async withSessionMutation(sessionKey, operation) {
     const key = String(sessionKey || "");
     const previous = this.mutationChains.get(key) || Promise.resolve();
@@ -179,7 +187,7 @@ class SessionManager {
           submission.completedAt = nowIso();
           await this.finishWorkspaceTurn(record, submission);
           await this.persistSubmission(submission);
-          await this.eventStore.append(`submission.${submission.status}`, {
+          this.note(`submission.${submission.status}`, {
             sessionKey: record.sessionKey,
             submissionId,
             error: submission.error || null,
@@ -208,11 +216,11 @@ class SessionManager {
       const attached = typeof this.tmux.hasAttachedClients === "function"
         && await this.tmux.hasAttachedClients(tmuxSessionName);
       if (attached) {
-        await this.eventStore.append("session.stale_pane_attached", { tmuxSessionName });
+        this.note("session.stale_pane_attached", { tmuxSessionName });
         continue;
       }
       await this.tmux.kill(tmuxSessionName);
-      await this.eventStore.append("session.stale_pane_removed", { tmuxSessionName });
+      this.note("session.stale_pane_removed", { tmuxSessionName });
     }
   }
 
@@ -340,7 +348,7 @@ class SessionManager {
     };
     this.sessions.set(key, session);
     await this.persistSession(session);
-    await this.eventStore.append("session.created", { sessionKey: key, driver: normalizedDriver });
+    this.note("session.created", { sessionKey: key, driver: normalizedDriver });
     await this.launch(session);
     return publicSession(session);
   }
@@ -405,7 +413,7 @@ class SessionManager {
             if (decision?.action === "fail") return { status: "failed", error: decision.reason || "navigation failed", screen: lastScreen };
             await this.navigator.apply(this.tmux, session.tmuxSessionName, decision);
           } catch (err) {
-            await this.eventStore.append("navigation.error", {
+            this.note("navigation.error", {
               sessionKey: session.sessionKey,
               driver: session.driver,
               phase: "session_start",
@@ -461,7 +469,9 @@ class SessionManager {
       }
       const screen = await this.tmux.capture(session.tmuxSessionName, 80).catch(() => "");
       if (isReady(session.driver, screen)) {
-        const probe = await this.probeReadyInput(session);
+        // A probe that throws must not escape and turn a described timeout into an
+        // unexplained one; an unreadable composer is simply not settled.
+        const probe = await this.probeReadyInput(session).catch((err) => ({ ok: false, error: err.message }));
         if (probe.ok) return { settled: true, reason: null };
         reason = probe.error || reason;
       }
@@ -487,7 +497,7 @@ class SessionManager {
     session.status = ready.status;
     session.lastError = ready.error || null;
     await this.persistSession(session);
-    await this.eventStore.append(`session.${ready.status}`, {
+    this.note(`session.${ready.status}`, {
       sessionKey: session.sessionKey,
       driver: session.driver,
       error: ready.error || null,
@@ -551,18 +561,18 @@ class SessionManager {
           status,
           error,
           completedAt: nowIso(),
-        }).catch(() => {});
+        });
         this.active.delete(session.sessionKey);
         session.activeSubmissionId = null;
         session.lastSubmissionId = submissionId;
         session.status = status === "interrupted" ? "ready" : "attention_required";
         session.lastError = status === "interrupted" ? null : error;
         await this.persistSession(session).catch(() => {});
-        await this.eventStore.append(`submission.${status}`, {
+        this.note(`submission.${status}`, {
           sessionKey: session.sessionKey,
           submissionId,
           error,
-        }).catch(() => {});
+        });
       }
       throw err;
     }
@@ -634,7 +644,7 @@ class SessionManager {
     try {
       await this.persistSubmission(submission);
       await this.persistSession(session);
-      await this.eventStore.append("submission.accepted", { sessionKey: session.sessionKey, submissionId });
+      this.note("submission.accepted", { sessionKey: session.sessionKey, submissionId });
       return { session, submission, activeRuntime };
     } catch (err) {
       if (this.active.get(session.sessionKey) === activeRuntime) {
@@ -649,11 +659,11 @@ class SessionManager {
         session.status = "attention_required";
         session.lastError = error;
         await this.persistSession(session).catch(() => {});
-        await this.eventStore.append("submission.failed", {
+        this.note("submission.failed", {
           sessionKey: session.sessionKey,
           submissionId,
           error,
-        }).catch(() => {});
+        });
       }
       throw err;
     }
@@ -671,23 +681,33 @@ class SessionManager {
     return null;
   }
 
+  // The last net under an execution that threw. It has nothing behind it, so every
+  // step here is total: in-memory state is settled first, and no write may throw.
   async failUnexpectedExecution(session, submission, activeRuntime, error) {
     if (this.active.get(session.sessionKey) !== activeRuntime) return;
     const status = activeRuntime.interrupted ? "interrupted" : "failed";
     const failure = tailText(error.message || String(error), 20_000);
-    await this.finalizeSubmission(session, submission, {
-      status,
-      error: failure,
-      completedAt: nowIso(),
-    });
     this.active.delete(session.sessionKey);
     session.activeSubmissionId = null;
     session.lastSubmissionId = submission.submissionId;
     session.status = status === "interrupted" ? "ready"
       : error.code === "AUTH_REQUIRED" ? "auth_required" : "attention_required";
     session.lastError = status === "interrupted" ? null : failure;
-    await this.persistSession(session);
-    await this.eventStore.append(`submission.${submission.status}`, {
+    submission.status = status;
+    submission.error = failure;
+    submission.completedAt = submission.completedAt || nowIso();
+    await this.finalizeSubmission(session, submission, {
+      status,
+      error: failure,
+      completedAt: submission.completedAt,
+    }).catch((err) => {
+      process.stderr.write(`[cli-runtime] finalization failed for ${submission.submissionId}: ${err.message}\n`);
+      return this.persistSubmission(submission).catch(() => {});
+    });
+    await this.persistSession(session).catch((err) => {
+      process.stderr.write(`[cli-runtime] session persist failed for ${session.sessionKey}: ${err.message}\n`);
+    });
+    this.note(`submission.${submission.status}`, {
       sessionKey: session.sessionKey,
       submissionId: submission.submissionId,
       error: submission.error,
@@ -714,7 +734,7 @@ class SessionManager {
           : "";
         if (isPastedPromptEditable(session.driver, screen, cursorLine, evidence)) {
           retried = true;
-          await this.eventStore.append("submission.submit_retry", {
+          this.note("submission.submit_retry", {
             sessionKey: session.sessionKey,
             submissionId: submission.submissionId,
           });
@@ -772,7 +792,7 @@ class SessionManager {
       startedAt: submission.startedAt,
     });
     await this.persistSubmission(submission);
-    await this.eventStore.append("submission.started", {
+    this.note("submission.started", {
       sessionKey: session.sessionKey,
       submissionId: submission.submissionId,
     });
@@ -828,7 +848,7 @@ class SessionManager {
             status: "running",
             startedAt: submission.startedAt,
           });
-          await this.eventStore.append("submission.progress", {
+          this.note("submission.progress", {
             sessionKey: session.sessionKey,
             submissionId: submission.submissionId,
             progress: submission.progress,
@@ -904,7 +924,7 @@ class SessionManager {
       session.activeSubmissionId = null;
       session.lastSubmissionId = submission.submissionId;
       await this.persistSession(session);
-      await this.eventStore.append(`submission.${submission.status}`, {
+      this.note(`submission.${submission.status}`, {
         sessionKey: session.sessionKey,
         submissionId: submission.submissionId,
         reply: tailText(submission.reply || "", 20_000),
@@ -920,7 +940,9 @@ class SessionManager {
       // turn. Stop it and observe where it landed before reporting anything.
       const timedOut = status === "failed"
         && ["SUBMISSION_ABSOLUTE_TIMEOUT", "SUBMISSION_INACTIVITY_TIMEOUT"].includes(err.code);
-      const settle = timedOut && session.status !== "closed" ? await this.settleTimedOutDriver(session) : null;
+      const settle = timedOut && session.status !== "closed"
+        ? await this.settleTimedOutDriver(session).catch((err) => ({ settled: false, reason: `settle failed: ${err.message}` }))
+        : null;
       const error = tailText(timedOut
         ? `${err.message}; ${settle.settled ? "driver interrupted and back at its prompt" : `driver did not settle: ${settle.reason}`}`
         : err.message || String(err), 20_000);
@@ -933,7 +955,7 @@ class SessionManager {
       });
       this.active.delete(session.sessionKey);
       if (timedOut) {
-        await this.eventStore.append("submission.timed_out", {
+        this.note("submission.timed_out", {
           sessionKey: session.sessionKey,
           submissionId: submission.submissionId,
           reason: err.reason || "absolute_timeout",
@@ -951,7 +973,7 @@ class SessionManager {
         session.lastSubmissionId = submission.submissionId;
       }
       if (session.status !== "closed") await this.persistSession(session);
-      await this.eventStore.append(`submission.${submission.status}`, {
+      this.note(`submission.${submission.status}`, {
         sessionKey: session.sessionKey,
         submissionId: submission.submissionId,
         error: submission.error,
@@ -974,9 +996,9 @@ class SessionManager {
   scheduleOperationalPrune() {
     if (this.prunePending) return;
     this.prunePending = true;
-    setImmediate(() => this.pruneOperationalState().catch((err) => this.eventStore.append("runtime.prune_failed", {
-      error: tailText(err.message || String(err), 4000),
-    }).catch(() => {})).finally(() => { this.prunePending = false; }));
+    setImmediate(() => this.pruneOperationalState()
+      .catch((err) => this.note("runtime.prune_failed", { error: tailText(err.message || String(err), 4000) }))
+      .finally(() => { this.prunePending = false; }));
   }
 
   async pruneOperationalState() {
@@ -1031,11 +1053,11 @@ class SessionManager {
       return finished;
     } catch (err) {
       submission.outputError = tailText(err.message || String(err), 4000);
-      await this.eventStore.append("workspace.turn_state_failed", {
+      this.note("workspace.turn_state_failed", {
         sessionKey: session.sessionKey,
         submissionId: submission.submissionId,
         error: submission.outputError,
-      }).catch(() => {});
+      });
       return null;
     }
   }
@@ -1044,11 +1066,11 @@ class SessionManager {
     try {
       return await this.workspaceState.updateTurn(options);
     } catch (err) {
-      await this.eventStore.append("workspace.turn_state_failed", {
+      this.note("workspace.turn_state_failed", {
         sessionKey: options.sessionKey || null,
         submissionId: options.submissionId,
         error: tailText(err.message || String(err), 4000),
-      }).catch(() => {});
+      });
       return null;
     }
   }
@@ -1093,7 +1115,7 @@ class SessionManager {
     active.controller.abort();
     await this.persistSession(session);
     if (phase !== "preparing") await this.tmux.interrupt(session.tmuxSessionName).catch(() => {});
-    await this.eventStore.append("session.interrupt_requested", {
+    this.note("session.interrupt_requested", {
       sessionKey: session.sessionKey,
       submissionId: active.submission.submissionId,
     });
@@ -1119,7 +1141,7 @@ class SessionManager {
       session.startMode = session.providerSessionId ? "resume" : "fresh";
       session.lastError = null;
       await this.persistSession(session);
-      await this.eventStore.append("session.restart_requested", { sessionKey: session.sessionKey });
+      this.note("session.restart_requested", { sessionKey: session.sessionKey });
       try {
         return await this.launch(session);
       } catch (err) {
@@ -1149,7 +1171,7 @@ class SessionManager {
       session.status = "stopped";
       session.lastError = null;
       await this.persistSession(session);
-      await this.eventStore.append("session.released", { sessionKey: session.sessionKey });
+      this.note("session.released", { sessionKey: session.sessionKey });
       return publicSession(session);
     });
   }
@@ -1188,7 +1210,7 @@ class SessionManager {
         remaining.submission.completedAt = nowIso();
         await this.finishWorkspaceTurn(session, remaining.submission);
         await this.persistSubmission(remaining.submission);
-        await this.eventStore.append("submission.interrupted", {
+        this.note("submission.interrupted", {
           sessionKey: session.sessionKey,
           submissionId: remaining.submission.submissionId,
           error: remaining.submission.error,
@@ -1198,7 +1220,7 @@ class SessionManager {
       session.status = "closed";
       session.activeSubmissionId = null;
       await this.persistSession(session);
-      await this.eventStore.append("session.closed", { sessionKey: session.sessionKey });
+      this.note("session.closed", { sessionKey: session.sessionKey });
       return publicSession(session);
     });
   }

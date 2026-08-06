@@ -41,6 +41,7 @@ class EventStore {
     this.fileBytes = 0;
     this.fileEvents = 0;
     this.writeChain = Promise.resolve();
+    this.durableSequence = 0;
     this.maxBytes = maxBytes;
     this.maxEvents = maxEvents;
   }
@@ -60,6 +61,7 @@ class EventStore {
     }
     this.records.sort((a, b) => a.event.sequence - b.event.sequence);
     this.trim();
+    this.durableSequence = this.sequence;
     const stat = await fs.stat(this.filePath).catch(() => null);
     this.fileBytes = stat?.size || 0;
     this.fileEvents = this.records.length;
@@ -74,29 +76,36 @@ class EventStore {
   }
 
   async compact() {
+    // Only rewrite what is already on disk: a record whose queued append has not run
+    // yet would otherwise be written twice, once here and once by its own write.
+    const durable = this.records.filter((item) => item.event.sequence <= this.durableSequence);
     const temporary = `${this.filePath}.${process.pid}.${Date.now()}.tmp`;
-    const text = this.records.map((item) => `${JSON.stringify(item.event)}\n`).join("");
+    const text = durable.map((item) => `${JSON.stringify(item.event)}\n`).join("");
     await fs.writeFile(temporary, text, { mode: 0o600 });
     await fs.rename(temporary, this.filePath);
     this.fileBytes = Buffer.byteLength(text);
-    this.fileEvents = this.records.length;
+    this.fileEvents = durable.length;
   }
 
-  async append(type, details = {}) {
-    let written;
-    this.writeChain = this.writeChain.catch(() => {}).then(async () => {
-      written = { version: 1, sequence: ++this.sequence, at: nowIso(), type, ...details };
-      const line = `${JSON.stringify(written)}\n`;
+  // Readers serve from memory, so an event is visible the moment it happens. The
+  // durable write is queued behind it: a caller that does not await this promise
+  // cannot be failed by an unwritable event log.
+  append(type, details = {}) {
+    const written = { version: 1, sequence: ++this.sequence, at: nowIso(), type, ...details };
+    const line = `${JSON.stringify(written)}\n`;
+    const bytes = Buffer.byteLength(line);
+    this.records.push({ event: written, bytes });
+    this.trim();
+    this.events.emit("event", written);
+    const durableWrite = this.writeChain.catch(() => {}).then(async () => {
       await fs.appendFile(this.filePath, line, { encoding: "utf8", mode: 0o600 });
-      this.fileBytes += Buffer.byteLength(line);
+      this.durableSequence = written.sequence;
+      this.fileBytes += bytes;
       this.fileEvents += 1;
-      this.records.push({ event: written, bytes: Buffer.byteLength(line) });
-      this.trim();
       if (this.fileBytes > this.maxBytes * 2 || this.fileEvents > this.maxEvents * 2) await this.compact();
-      this.events.emit("event", written);
     });
-    await this.writeChain;
-    return written;
+    this.writeChain = durableWrite.catch(() => {});
+    return durableWrite.then(() => written);
   }
 
   read({ after = 0, sessionKey = null, limit = 500 } = {}) {

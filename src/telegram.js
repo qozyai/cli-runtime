@@ -97,12 +97,12 @@ function messageBody(message) {
   return String(message?.text || message?.caption || richMessageValue(message)).trim();
 }
 
-function submissionMessage(message, repliedInputs = []) {
+function submissionMessage(message, repliedInputs = [], repliedWarning = null) {
   const current = messageBody(message);
   const replied = message?.reply_to_message;
   if (!replied) return current;
   const repliedText = messageBody(replied);
-  if (!repliedText && repliedInputs.length === 0) return current;
+  if (!repliedText && repliedInputs.length === 0 && !repliedWarning) return current;
 
   const lines = ["<telegram-reply-context>"];
   if (repliedText) lines.push("Replied-to message text:", repliedText);
@@ -110,6 +110,11 @@ function submissionMessage(message, repliedInputs = []) {
     if (repliedText) lines.push("");
     lines.push("Replied-to message attachments included with this request:");
     for (const input of repliedInputs) lines.push(`- ${input.name}`);
+  }
+  // The driver is told what it is missing rather than left to infer a complete quote.
+  if (repliedWarning) {
+    if (repliedText || repliedInputs.length > 0) lines.push("");
+    lines.push(`Replied-to attachment unavailable: ${repliedWarning}`);
   }
   lines.push("</telegram-reply-context>", "", "Current message:", current || "(No text supplied.)");
   return lines.join("\n");
@@ -180,11 +185,16 @@ class TelegramAdapter {
     await this.ownerStore.init();
     await this.catalog.init();
     await this.routeStore.init();
-    await this.notices.init();
     // Announce before the backlog is replayed, so the restart precedes the answers
-    // to messages that arrived while the runtime was down.
-    await this.announceRestart();
-    await this.flushNotices();
+    // to messages that arrived while the runtime was down. None of it may stop the
+    // adapter from starting: announcements are a courtesy, ingress is the job.
+    try {
+      await this.notices.init();
+      await this.announceRestart();
+      await this.flushNotices();
+    } catch (err) {
+      this.log(`[telegram] restart announcements unavailable: ${err.message}`);
+    }
     this.offset = Number((await readJson(this.offsetPath, {})).offset || 0);
     const queued = (await fs.readdir(this.queueDir).catch(() => []))
       .filter((name) => name.endsWith(".json"))
@@ -914,7 +924,17 @@ class TelegramAdapter {
       }
       inputs.push(...await this.downloadInputs(message, operation.controller.signal));
       this.checkOperation(operation);
-      const repliedInputs = await this.downloadRepliedInputs(message, operation.controller.signal);
+      // Quoted context is an enrichment of the user's message, not a precondition for
+      // it: if the attachment cannot be fetched, say so and still run the turn.
+      let repliedInputs = [];
+      let repliedWarning = null;
+      try {
+        repliedInputs = await this.downloadRepliedInputs(message, operation.controller.signal);
+      } catch (err) {
+        if (err.code === "ROUTE_OPERATION_CANCELLED") throw err;
+        repliedWarning = err.message;
+        await this.send(message, `Continuing without the replied-to attachment: ${err.message}`).catch(() => {});
+      }
       inputs.push(...repliedInputs);
       this.checkOperation(operation);
       for (const input of inputs) {
@@ -931,7 +951,7 @@ class TelegramAdapter {
         this.checkOperation(operation);
       }
       const accepted = await this.runtime("POST", `/v1/sessions/${encodeURIComponent(operation.sessionKey)}/submissions`, {
-        message: submissionMessage(message, repliedInputs),
+        message: submissionMessage(message, repliedInputs, repliedWarning),
         inputs: inputs.map(({ temporary, replyContext, transcriptionError, ...input }) => ({ ...input, transcriptionError })),
         idempotencyKey: `telegram:${message.chat.id}:${message.message_id}`,
       });

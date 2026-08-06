@@ -38,6 +38,13 @@ class AuthManager {
     this.startLocks = new Map();
   }
 
+  // Same rule as the session manager: an event append never fails an auth flow.
+  note(type, details = {}) {
+    this.eventStore.append(type, details).catch((err) => {
+      process.stderr.write(`[cli-runtime] event append failed (${type}): ${err.message}\n`);
+    });
+  }
+
   async withStartLock(driver, operation) {
     const previous = this.startLocks.get(driver) || Promise.resolve();
     let release;
@@ -164,7 +171,7 @@ class AuthManager {
       HOME: selected.homeDir,
       DISABLE_AUTOUPDATER: "1",
     });
-    await this.eventStore.append("auth.started", { driver });
+    this.note("auth.started", { driver });
 
     const deadline = Date.now() + this.config.startupTimeoutMs;
     let last = { phase: "starting", url: null, code: null, screen: "" };
@@ -208,7 +215,7 @@ class AuthManager {
           }
           await this.navigator.apply(this.tmux, sessionName, decision);
         } catch (err) {
-          await this.eventStore.append("navigation.error", {
+          this.note("navigation.error", {
             sessionKey: `auth:${driver}`,
             driver,
             phase: "authentication",
@@ -219,7 +226,7 @@ class AuthManager {
       }
       await sleep(300);
     }
-    await this.eventStore.append(`auth.${last.phase}`, { driver, url: last.url, code: last.code });
+    this.note(`auth.${last.phase}`, { driver, url: last.url, code: last.code });
     return { driver, authenticated: last.phase === "completed", ...last, attachCommand: this.tmux.attachCommand(sessionName) };
   }
 
@@ -255,7 +262,7 @@ class AuthManager {
     const status = await this.status(driver);
     if (status.authenticated) last.phase = "completed";
     if (status.authenticated) this.statusCache.set(driver, { value: status, expiresAt: Date.now() + 60_000 });
-    await this.eventStore.append(`auth.${last.phase}`, { driver });
+    this.note(`auth.${last.phase}`, { driver });
     return {
       ...status,
       phase: last.phase,
