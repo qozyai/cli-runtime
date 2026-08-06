@@ -122,6 +122,14 @@ quarantined as a whole; schema-invalid entries are quarantined individually and
 valid routes continue loading. There is no legacy route-file reader or route-key
 migration.
 
+Restart announcements use two more files in the same directory. Notices waiting
+to be sent are one JSON file each under `<state>/telegram/notices/`, written by
+whoever is about to restart the adapter and removed as they are sent;
+`<state>/telegram/last-run.json` records the current run and is stamped
+`stoppedCleanly` by the signal handler, so a start that finds it unstamped knows
+the previous run died. Both are operational: a torn file is dropped and logged
+rather than quarantined, because the message it held is already stale.
+
 Use `cli-runtime session list` to inspect runtime records and
 `cli-runtime session attach <session-key>` to inspect a resident pane. The local
 runtime API is protected by its mode-`0600` Unix socket, not application-level

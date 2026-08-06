@@ -20,9 +20,10 @@ Three kinds of document, kept apart because they are read for different reasons.
 | [`0002-telegram-project-routing`](specs/0002-telegram-project-routing/spec.md) | Implemented. Shipped as two independent releases with separate gates. [Decisions](specs/0002-telegram-project-routing/decisions.md). |
 | [`0003-normalized-semantic-history`](specs/0003-normalized-semantic-history/spec.md) | Planned, not implemented. Preserves ordered user, model, and tool blocks with bounded tool data. [Decisions](specs/0003-normalized-semantic-history/decisions.md). |
 | [`0004-turn-lifetime`](specs/0004-turn-lifetime/spec.md) | Implemented. Replaces the wall-clock turn deadline with stall detection and a defined aftermath. [Decisions](specs/0004-turn-lifetime/decisions.md). |
+| [`0005-restart-announcements`](specs/0005-restart-announcements/spec.md) | Implemented. Notice spool for planned restarts, plus self-reported unexpected ones. [Decisions](specs/0005-restart-announcements/decisions.md). |
 
 Each spec carries its own `## Status` block; that block is the authority, this
-table is the index. Number the next spec `0005-` and give it a slug describing
+table is the index. Number the next spec `0006-` and give it a slug describing
 the work, not the release.
 
 ## Guides

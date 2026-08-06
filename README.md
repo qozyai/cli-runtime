@@ -236,6 +236,23 @@ starts, so nothing runs on partial context. Replying to a message that carries
 neither text nor attachments, such as a forum's topic-created service message,
 adds no context block.
 
+A restart is announced rather than silent. Whoever restarts the adapter drops a
+one-shot notice in `<state>/telegram/notices/*.json`
+(`{version, kind, text, route?, expiresAt?}`); the running adapter drains that
+directory once a second, sends each notice, and deletes it. A notice carrying a
+`route` goes to that chat and topic, and one without goes to the bound owner
+privately. Notices are deleted before they are sent, so a crash loses one rather
+than repeating it, and a notice past `expiresAt` is discarded — a "stopping"
+message must never arrive after the restart it described.
+
+The adapter announces one thing on its own: a previous run that did not stop
+cleanly, which it detects from `<state>/telegram/last-run.json`. Planned
+restarts stay the restarter's business, because only it knows the reason.
+Repeated crashes are collapsed into one message per
+`CLI_RUNTIME_RESTART_ANNOUNCE_WINDOW_MS` (default five minutes) that reports how
+many restarts it stands for; `CLI_RUNTIME_TELEGRAM_NOTICE_POLL_MS` (default
+`1000`) sets the drain interval.
+
 See [`docs/guides/telegram-projects.md`](docs/guides/telegram-projects.md) for
 project naming, switching, rename recovery, route state, and command behavior.
 

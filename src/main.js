@@ -151,6 +151,8 @@ async function runService(mode) {
     const telegram = new TelegramAdapter({ config, openaiHelper });
     const stop = async () => {
       telegram.stop();
+      // Stamping the marker is what separates "stopped" from "died" at the next start.
+      await telegram.markCleanStop();
       await adapterLock.release();
       process.exit();
     };

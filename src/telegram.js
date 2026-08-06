@@ -8,6 +8,7 @@ const { mimeTypeFor, safeFilename } = require("./progress");
 const { ProjectCatalog, validProjectName } = require("./project-catalog");
 const { OwnerStore } = require("./owner-store");
 const { RouteStore } = require("./route-store");
+const { NoticeSpool, RunMarker, releaseIdFromPath, restartAnnouncement } = require("./notices");
 
 const TELEGRAM_DOCUMENT_LIMIT = 50 * 1024 * 1024;
 const TERMINAL_SUBMISSION_STATES = new Set(["completed", "failed", "interrupted"]);
@@ -161,6 +162,10 @@ class TelegramAdapter {
     this.catalog = catalog || new ProjectCatalog({ root: config.telegram.projectsRoot, log });
     this.routeStore = routeStore || new RouteStore({ stateDir: config.stateDir, log });
     this.ownerStore = ownerStore || new OwnerStore({ stateDir: config.stateDir, log });
+    this.notices = new NoticeSpool({ dir: path.join(this.telegramDir, "notices"), log });
+    this.runMarker = new RunMarker({ filePath: path.join(this.telegramDir, "last-run.json"), log });
+    this.flushingNotices = false;
+    this.noticeTimer = null;
     this.chains = new Map();
     this.routeSequences = new Map();
     this.pendingBarriers = new Map();
@@ -175,6 +180,11 @@ class TelegramAdapter {
     await this.ownerStore.init();
     await this.catalog.init();
     await this.routeStore.init();
+    await this.notices.init();
+    // Announce before the backlog is replayed, so the restart precedes the answers
+    // to messages that arrived while the runtime was down.
+    await this.announceRestart();
+    await this.flushNotices();
     this.offset = Number((await readJson(this.offsetPath, {})).offset || 0);
     const queued = (await fs.readdir(this.queueDir).catch(() => []))
       .filter((name) => name.endsWith(".json"))
@@ -1077,8 +1087,68 @@ class TelegramAdapter {
     if (queuePath) this.dispatch(update, queuePath);
   }
 
+  // Notices carry their own route; anything else is operational and goes to the
+  // owner privately rather than into every bound project route.
+  noticeTarget(route) {
+    if (route?.chatId) {
+      return route.threadId
+        ? { chat: { id: route.chatId }, is_topic_message: true, message_thread_id: route.threadId }
+        : { chat: { id: route.chatId } };
+    }
+    const owner = this.ownerStore.get();
+    return owner ? { chat: { id: owner.userId } } : null;
+  }
+
+  async flushNotices() {
+    if (this.flushingNotices) return;
+    this.flushingNotices = true;
+    try {
+      for (const notice of await this.notices.drain()) {
+        const target = this.noticeTarget(notice.route);
+        if (!target) {
+          this.log(`[telegram] dropped ${notice.kind} notice: no route and no bound owner`);
+          continue;
+        }
+        await this.send(target, notice.text)
+          .catch((err) => this.log(`[telegram] ${notice.kind} notice failed: ${err.message}`));
+      }
+    } catch (err) {
+      this.log(`[telegram] notice drain failed: ${err.message}`);
+    } finally {
+      this.flushingNotices = false;
+    }
+  }
+
+  // Only the unexplained restart is ours to report: a planned one is announced by
+  // whoever planned it, and it knows the reason we cannot see.
+  async announceRestart() {
+    const marker = await this.runMarker.start({
+      release: releaseIdFromPath(process.argv[1]),
+      windowMs: this.config.telegram.restartAnnounceWindowMs,
+    }).catch((err) => {
+      this.log(`[telegram] run marker unavailable: ${err.message}`);
+      return null;
+    });
+    if (!marker?.announce) return;
+    const target = this.noticeTarget(null);
+    if (!target) {
+      this.log("[telegram] unexpected restart not announced: no bound owner");
+      return;
+    }
+    await this.send(target, restartAnnouncement(marker))
+      .catch((err) => this.log(`[telegram] restart announcement failed: ${err.message}`));
+  }
+
+  async markCleanStop() {
+    await this.runMarker.markCleanStop().catch((err) => this.log(`[telegram] clean-stop marker failed: ${err.message}`));
+  }
+
   async run() {
     await this.init();
+    // A stop notice must not wait out a 25-second long poll.
+    this.noticeTimer = setInterval(() => { this.flushNotices().catch(() => {}); },
+      this.config.telegram.noticePollMs || 1000);
+    this.noticeTimer.unref?.();
     while (!this.stopped) {
       try {
         const updates = await this.api("getUpdates", { offset: this.offset, timeout: 25, allowed_updates: ["message"] });
@@ -1092,6 +1162,10 @@ class TelegramAdapter {
 
   stop() {
     this.stopped = true;
+    if (this.noticeTimer) {
+      clearInterval(this.noticeTimer);
+      this.noticeTimer = null;
+    }
   }
 }
 
