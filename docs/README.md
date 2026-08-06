@@ -22,9 +22,10 @@ Three kinds of document, kept apart because they are read for different reasons.
 | [`0004-turn-lifetime`](specs/0004-turn-lifetime/spec.md) | Implemented. Replaces the wall-clock turn deadline with stall detection and a defined aftermath. [Decisions](specs/0004-turn-lifetime/decisions.md). |
 | [`0005-restart-announcements`](specs/0005-restart-announcements/spec.md) | Implemented. Notice spool for planned restarts, plus self-reported unexpected ones. [Decisions](specs/0005-restart-announcements/decisions.md). |
 | [`0006-peripheral-failure-isolation`](specs/0006-peripheral-failure-isolation/spec.md) | Implemented. Project-wide invariant: observability, history, and enrichment failures never fail a turn. [Decisions](specs/0006-peripheral-failure-isolation/decisions.md). |
+| [`0007-burst-joining`](specs/0007-burst-joining/spec.md) | Implemented. Messages arriving together are debounced into one turn. |
 
 Each spec carries its own `## Status` block; that block is the authority, this
-table is the index. Number the next spec `0007-` and give it a slug describing
+table is the index. Number the next spec `0008-` and give it a slug describing
 the work, not the release.
 
 ## Guides

@@ -122,6 +122,11 @@ quarantined as a whole; schema-invalid entries are quarantined individually and
 valid routes continue loading. There is no legacy route-file reader or route-key
 migration.
 
+Ordinary messages are buffered per route for a short debounce window before they
+dispatch, so a burst arriving together becomes one turn; commands are never
+buffered. Buffering happens after an update is persisted, so a burst interrupted
+by a restart replays from the queue and re-forms.
+
 Restart announcements use two more files in the same directory. Notices waiting
 to be sent are one JSON file each under `<state>/telegram/notices/`, written by
 whoever is about to restart the adapter and removed as they are sent;

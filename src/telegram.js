@@ -175,6 +175,7 @@ class TelegramAdapter {
     this.routeSequences = new Map();
     this.pendingBarriers = new Map();
     this.activeOperationByRoute = new Map();
+    this.bursts = new Map();
     this.inflightUpdates = new Set();
     this.retryCounts = new Map();
   }
@@ -760,9 +761,11 @@ class TelegramAdapter {
     await this.send(message, lines.join("\n"));
   }
 
-  async controlStop(message) {
+  async controlStop(message, droppedBurst = 0) {
     const stopped = await this.cancelActiveOperation(message, { fallbackToSelected: true });
-    await this.send(message, stopped.cancelled ? "Stop requested." : "Nothing is running.");
+    const dropped = Number(droppedBurst) > 0
+      ? ` Dropped ${droppedBurst} unsent message${droppedBurst === 1 ? "" : "s"}.` : "";
+    await this.send(message, `${stopped.cancelled ? "Stop requested." : "Nothing is running."}${dropped}`);
   }
 
   async controlReset(message, preparation = {}) {
@@ -843,11 +846,11 @@ class TelegramAdapter {
     await this.send(message, `${selectedLabel} selected. The next message starts or resumes its own conversation lazily; ${previousLabel} chat context is not transferred.`);
   }
 
-  async control(message, command, preparation = {}) {
+  async control(message, command, preparation = {}, droppedBurst = 0) {
     if (command.name === "project" && !command.argument) return this.listProjects(message);
     if (command.name === "project") return this.controlProject(message, command, preparation);
     if (command.name === "status") return this.controlStatus(message);
-    if (command.name === "stop") return this.controlStop(message);
+    if (command.name === "stop") return this.controlStop(message, droppedBurst);
     if (command.name === "reset") return this.controlReset(message, preparation);
     if (command.name === "driver") return this.controlDriver(message, command, preparation);
     return undefined;
@@ -881,7 +884,7 @@ class TelegramAdapter {
     await this.send(message, `Project "${route.project}" is selected and ${route.driver === "claude" ? "Claude Code" : "Codex"} is authenticated. Send a message to start lazily.`);
   }
 
-  async handleOrdinary(message, route, ordinal = 0) {
+  async handleOrdinary(message, route, ordinal = 0, parts = null) {
     if (!route.project) {
       await this.send(message, "No project is selected. Use /project <name>.");
       return;
@@ -928,21 +931,29 @@ class TelegramAdapter {
         await this.send(message, `The ${route.driver === "claude" ? "Claude Code" : "Codex"} session needs attention: ${session.lastError || session.status}`);
         return;
       }
-      inputs.push(...await this.downloadInputs(message, operation.controller.signal));
-      this.checkOperation(operation);
-      // Quoted context is an enrichment of the user's message, not a precondition for
-      // it: if the attachment cannot be fetched, say so and still run the turn.
-      let repliedInputs = [];
-      let repliedWarning = null;
-      try {
-        repliedInputs = await this.downloadRepliedInputs(message, operation.controller.signal);
-      } catch (err) {
-        if (err.code === "ROUTE_OPERATION_CANCELLED") throw err;
-        repliedWarning = err.message;
-        await this.send(message, `Continuing without the replied-to attachment: ${err.message}`).catch(() => {});
+      // Each part contributes what it would have contributed alone, including its own
+      // reply context, so a joined burst loses nothing a separate turn would have had.
+      const burst = Array.isArray(parts) && parts.length > 0 ? parts : [message];
+      const pieces = [];
+      for (const part of burst) {
+        inputs.push(...await this.downloadInputs(part, operation.controller.signal));
+        this.checkOperation(operation);
+        // Quoted context is an enrichment of the user's message, not a precondition for
+        // it: if the attachment cannot be fetched, say so and still run the turn.
+        let repliedInputs = [];
+        let repliedWarning = null;
+        try {
+          repliedInputs = await this.downloadRepliedInputs(part, operation.controller.signal);
+        } catch (err) {
+          if (err.code === "ROUTE_OPERATION_CANCELLED") throw err;
+          repliedWarning = err.message;
+          await this.send(message, `Continuing without the replied-to attachment: ${err.message}`).catch(() => {});
+        }
+        inputs.push(...repliedInputs);
+        this.checkOperation(operation);
+        const piece = submissionMessage(part, repliedInputs, repliedWarning);
+        if (piece) pieces.push(piece);
       }
-      inputs.push(...repliedInputs);
-      this.checkOperation(operation);
       for (const input of inputs) {
         if (input.transcript) {
           const label = input.replyContext ? "Replied-to audio transcript:" : "Your voice transcript:";
@@ -957,7 +968,7 @@ class TelegramAdapter {
         this.checkOperation(operation);
       }
       const accepted = await this.runtime("POST", `/v1/sessions/${encodeURIComponent(operation.sessionKey)}/submissions`, {
-        message: submissionMessage(message, repliedInputs, repliedWarning),
+        message: pieces.join("\n"),
         inputs: inputs.map(({ temporary, replyContext, transcriptionError, ...input }) => ({ ...input, transcriptionError })),
         idempotencyKey: `telegram:${message.chat.id}:${message.message_id}`,
       });
@@ -1017,14 +1028,111 @@ class TelegramAdapter {
     }
   }
 
-  async handle(message, { preparation = {}, ordinal = 0 } = {}) {
+  async handle(message, { preparation = {}, ordinal = 0, parts = null, droppedBurst = 0 } = {}) {
     const text = messageBody(message);
     const attached = this.telegramFile(message);
     if (!text && !attached) return;
     const command = commandFor(message);
-    if (command && CONTROL_COMMANDS.has(command.name)) return this.control(message, command, preparation);
+    if (command && CONTROL_COMMANDS.has(command.name)) return this.control(message, command, preparation, droppedBurst);
     if (command?.name === "start") return this.handleStart(message);
-    return this.handleOrdinary(message, this.routeState(message), ordinal);
+    return this.handleOrdinary(message, this.routeState(message), ordinal, parts);
+  }
+
+  // Messages that arrive together are one thought. A client that splits a long paste
+  // into several messages must not become several turns, so an ordinary message waits
+  // a short quiet period that every later arrival resets.
+  bufferBurst(routeKey, part) {
+    const debounceMs = Number(this.config.telegram.burstDebounceMs ?? 200);
+    if (!(debounceMs > 0)) {
+      this.queueBurst(routeKey, [part]);
+      return;
+    }
+    const burst = this.bursts.get(routeKey) || { parts: [], timer: null, firstAt: Date.now() };
+    burst.parts.push(part);
+    this.bursts.set(routeKey, burst);
+    if (burst.timer) clearTimeout(burst.timer);
+    burst.timer = null;
+    const maxWaitMs = Number(this.config.telegram.burstMaxWaitMs || 2000);
+    const maxParts = Number(this.config.telegram.burstMaxParts || 25);
+    const elapsed = Date.now() - burst.firstAt;
+    if (burst.parts.length >= maxParts || elapsed >= maxWaitMs) {
+      this.flushBurst(routeKey);
+      return;
+    }
+    burst.timer = setTimeout(() => this.flushBurst(routeKey), Math.min(debounceMs, maxWaitMs - elapsed));
+    burst.timer.unref?.();
+  }
+
+  takeBurst(routeKey) {
+    const burst = this.bursts.get(routeKey);
+    if (!burst) return [];
+    this.bursts.delete(routeKey);
+    if (burst.timer) clearTimeout(burst.timer);
+    return burst.parts;
+  }
+
+  flushBurst(routeKey) {
+    const parts = this.takeBurst(routeKey);
+    if (parts.length > 0) this.queueBurst(routeKey, parts);
+    return parts.length;
+  }
+
+  // /stop cannot mean "and then run what I was still typing".
+  async discardBurst(routeKey) {
+    const parts = this.takeBurst(routeKey);
+    for (const part of parts) {
+      if (part.queuePath) await fs.rm(part.queuePath, { force: true }).catch(() => {});
+      this.inflightUpdates.delete(part.id);
+    }
+    return parts.length;
+  }
+
+  queueBurst(routeKey, parts) {
+    const primary = parts[0];
+    const previous = this.chains.get(routeKey) || Promise.resolve();
+    const next = previous.then(() => this.runParts(parts, () => this.handle(primary.message, {
+      ordinal: primary.ordinal,
+      parts: parts.map((part) => part.message),
+    })));
+    const tracked = next.finally(() => {
+      if (this.chains.get(routeKey) === tracked) this.chains.delete(routeKey);
+    });
+    this.chains.set(routeKey, tracked);
+  }
+
+  async runParts(parts, operation) {
+    const primary = parts[0];
+    const message = primary.message;
+    const settle = async () => {
+      for (const part of parts) {
+        if (part.queuePath) await fs.rm(part.queuePath, { force: true });
+      }
+      this.retryCounts.delete(primary.id);
+    };
+    try {
+      await operation();
+      await settle();
+    } catch (err) {
+      this.log(`[telegram] update ${primary.id} failed: ${err.message}`);
+      let reported = false;
+      try {
+        await this.send(message, `Runtime error: ${err.message}`);
+        reported = true;
+      } catch {}
+      if (reported) {
+        await settle();
+      } else if (parts.some((part) => part.queuePath) && !this.stopped) {
+        const attempts = (this.retryCounts.get(primary.id) || 0) + 1;
+        this.retryCounts.set(primary.id, attempts);
+        if (attempts < 3) {
+          setTimeout(() => {
+            for (const part of parts) this.dispatch(part.update, part.queuePath);
+          }, 2000 * attempts);
+        }
+      }
+    } finally {
+      for (const part of parts) this.inflightUpdates.delete(part.id);
+    }
   }
 
   dispatch(update, queuePath = null) {
@@ -1036,50 +1144,35 @@ class TelegramAdapter {
     const ordinal = (this.routeSequences.get(routeKey) || 0) + 1;
     this.routeSequences.set(routeKey, ordinal);
     const command = commandFor(message);
-    const listsProjects = command?.name === "project" && !command.argument;
-    const run = async (operation = () => this.handle(message)) => {
-      try {
-        await operation();
-        if (queuePath) await fs.rm(queuePath, { force: true });
-        this.retryCounts.delete(id);
-      } catch (err) {
-        this.log(`[telegram] update ${id} failed: ${err.message}`);
-        let reported = false;
-        try {
-          await this.send(message, `Runtime error: ${err.message}`);
-          reported = true;
-        } catch {}
-        if (reported) {
-          if (queuePath) await fs.rm(queuePath, { force: true });
-          this.retryCounts.delete(id);
-        } else if (queuePath && !this.stopped) {
-          const attempts = (this.retryCounts.get(id) || 0) + 1;
-          this.retryCounts.set(id, attempts);
-          if (attempts < 3) setTimeout(() => this.dispatch(update, queuePath), 2000 * attempts);
-        }
-      } finally {
-        this.inflightUpdates.delete(id);
-      }
-    };
-    if (listsProjects || (command && IMMEDIATE_COMMANDS.has(command.name))) {
-      void run(() => this.handle(message, { ordinal }));
+    const part = { id, update, message, queuePath, ordinal };
+    if (!command) {
+      this.bufferBurst(routeKey, part);
+      return;
+    }
+    // A command is never absorbed into a burst: it either supersedes what was
+    // buffered or lets it through first, so arrival order still holds.
+    const pending = command.name === "stop" ? this.discardBurst(routeKey) : Promise.resolve(this.flushBurst(routeKey));
+    const listsProjects = command.name === "project" && !command.argument;
+    const run = (operation) => Promise.resolve(pending).then((dropped) => this.runParts([part], () => operation(dropped)));
+    if (listsProjects || IMMEDIATE_COMMANDS.has(command.name)) {
+      void run((dropped) => this.handle(message, { ordinal, droppedBurst: dropped }));
       return;
     }
     const key = routeKey;
     const previous = this.chains.get(key) || Promise.resolve();
-    let operation = () => this.handle(message, { ordinal });
-    if (command && BARRIER_COMMANDS.has(command.name)) {
+    let operation = () => run((dropped) => this.handle(message, { ordinal, droppedBurst: dropped }));
+    if (BARRIER_COMMANDS.has(command.name)) {
       const preparation = this.prepareBarrier(message, command, ordinal);
-      operation = async () => {
+      operation = () => run(async (dropped) => {
         const prepared = await preparation;
         try {
-          return await this.handle(message, { preparation: prepared, ordinal });
+          return await this.handle(message, { preparation: prepared, ordinal, droppedBurst: dropped });
         } finally {
           this.removePendingBarrier(key, prepared.pendingBarrier);
         }
-      };
+      });
     }
-    const next = previous.then(() => run(operation));
+    const next = previous.then(() => operation());
     const tracked = next.finally(() => {
       if (this.chains.get(key) === tracked) this.chains.delete(key);
     });
@@ -1192,6 +1285,8 @@ class TelegramAdapter {
       clearInterval(this.noticeTimer);
       this.noticeTimer = null;
     }
+    // Buffered parts stay on disk in the queue and re-form on the next start.
+    for (const routeKey of [...this.bursts.keys()]) this.takeBurst(routeKey);
   }
 }
 

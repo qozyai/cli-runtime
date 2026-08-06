@@ -108,6 +108,9 @@ function loadConfig(env = process.env, { requireTelegramProjectsRoot = false } =
       maxFileBytes: positiveNumber(env.CLI_RUNTIME_TELEGRAM_MAX_FILE_BYTES, 20 * 1024 * 1024),
       requestTimeoutMs: positiveNumber(env.CLI_RUNTIME_TELEGRAM_REQUEST_TIMEOUT_MS, 30_000),
       restartAnnounceWindowMs: nonNegativeNumber(env.CLI_RUNTIME_RESTART_ANNOUNCE_WINDOW_MS, 5 * 60_000),
+      burstDebounceMs: nonNegativeNumber(env.CLI_RUNTIME_TELEGRAM_BURST_DEBOUNCE_MS, 200),
+      burstMaxWaitMs: positiveNumber(env.CLI_RUNTIME_TELEGRAM_BURST_MAX_WAIT_MS, 2000),
+      burstMaxParts: positiveNumber(env.CLI_RUNTIME_TELEGRAM_BURST_MAX_PARTS, 25),
       noticePollMs: positiveNumber(env.CLI_RUNTIME_TELEGRAM_NOTICE_POLL_MS, 1000),
       allowedChatIds: new Set(String(env.CLI_RUNTIME_TELEGRAM_ALLOWED_CHATS || "")
         .split(",")

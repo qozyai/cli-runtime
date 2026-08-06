@@ -240,6 +240,18 @@ what is missing, and the message runs. Replying to a message that carries neithe
 text nor attachments, such as a forum's topic-created service message, adds no
 context block.
 
+Messages that arrive together become one turn. Every ordinary message waits a
+short quiet period that each new arrival resets, so a long paste a client splits
+into several messages is answered as the one thought it was, not as fragments in
+sequence. Parts combine in arrival order — each keeping its own reply context —
+and their attachments are submitted together.
+`CLI_RUNTIME_TELEGRAM_BURST_DEBOUNCE_MS` (default `200`, `0` disables joining)
+sets the quiet period; `CLI_RUNTIME_TELEGRAM_BURST_MAX_WAIT_MS` (default `2000`)
+and `CLI_RUNTIME_TELEGRAM_BURST_MAX_PARTS` (default `25`) bound how long and how
+large a burst may grow. A command is never absorbed: it dispatches the buffered
+burst ahead of itself, except `/stop`, which discards it and says so. Messages
+that arrive while a turn is already running still queue per route, unchanged.
+
 A restart is announced rather than silent. Whoever restarts the adapter drops a
 one-shot notice in `<state>/telegram/notices/*.json`
 (`{version, kind, text, route?, expiresAt?}`); the running adapter drains that
