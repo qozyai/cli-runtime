@@ -6,6 +6,7 @@ const crypto = require("node:crypto");
 const {
   artifactRoot,
   buildLaunch,
+  composerResidue,
   isPastedPromptEditable,
   isReady,
   isStartupAuthScreen,
@@ -20,6 +21,8 @@ const PROMPT_PASTE_SETTLE_MS = 150;
 const PROMPT_ECHO_TIMEOUT_MS = 10_000;
 const MAX_INLINE_PROMPT_BYTES = 32 * 1024;
 const SUBMISSION_RETRY_AFTER_MS = 3000;
+const COMPOSER_CLEAR_ATTEMPTS = 3;
+const COMPOSER_CLEAR_SETTLE_MS = 60;
 
 function buildPromptDelivery({ prompt, inlinePrompt = prompt, promptPath, marker }) {
   const exactPrompt = String(prompt || "");
@@ -456,6 +459,31 @@ class SessionManager {
     return { ok: false, error: "terminal input probe was not visible", screen };
   }
 
+  // An interrupted paste leaves its partial text in the composer, where the next
+  // prompt would paste on top of it and submit both as one fused message. One C-u
+  // does not always clear a wrapped or multi-line remnant, so verify before pasting.
+  async clearComposer(session) {
+    if (typeof this.tmux.cursorLine !== "function") {
+      await this.tmux.sendKey(session.tmuxSessionName, "C-u");
+      return { ok: true, cursorLine: "", residue: "" };
+    }
+    let cursorLine = "";
+    let residue = "";
+    for (let attempt = 0; attempt < COMPOSER_CLEAR_ATTEMPTS; attempt += 1) {
+      await this.tmux.sendKey(session.tmuxSessionName, "C-u");
+      if (attempt > 0) {
+        // A remnant that survived C-u is usually parked to the right of the cursor.
+        await this.tmux.sendKey(session.tmuxSessionName, "C-e");
+        await this.tmux.sendKey(session.tmuxSessionName, "C-u");
+      }
+      await sleep(COMPOSER_CLEAR_SETTLE_MS);
+      cursorLine = await this.tmux.cursorLine(session.tmuxSessionName).catch(() => "");
+      residue = composerResidue(session.driver, cursorLine);
+      if (!residue) return { ok: true, cursorLine, residue: "" };
+    }
+    return { ok: false, cursorLine, residue };
+  }
+
   // Interrupt a turn that hit a limit and report whether the driver came back. The pane
   // is never killed here: a stalled turn must not cost the session or its conversation.
   async settleTimedOutDriver(session) {
@@ -861,10 +889,13 @@ class SessionManager {
       artifactPromise.catch(() => {});
       terminalPromise = this.monitorDriverProcess(session, monitorController.signal);
       terminalPromise.catch(() => {});
-      await this.tmux.sendKey(session.tmuxSessionName, "C-u");
-      const beforePasteCursorLine = typeof this.tmux.cursorLine === "function"
-        ? await this.tmux.cursorLine(session.tmuxSessionName).catch(() => "")
-        : "";
+      const cleared = await this.clearComposer(session);
+      if (!cleared.ok) {
+        const error = new Error(`composer still holds earlier input: ${tailText(cleared.residue, 200)}`);
+        error.code = "COMPOSER_NOT_CLEAR";
+        throw error;
+      }
+      const beforePasteCursorLine = cleared.cursorLine;
       const pasteEvidence = {
         beforePasteCursorLine,
         expectedChars: Array.from(delivery.terminalPrompt).length,
