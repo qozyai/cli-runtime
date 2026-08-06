@@ -195,9 +195,12 @@ test("independent Claude and Codex sessions serialize their own submissions", as
   const hangingDone = await waitFor(async () => {
     const value = await sessions.getSubmission(hanging.submissionId);
     return value?.status === "failed" ? value : null;
-  });
+  }, 15_000);
   assert.match(hangingDone.error, /did not complete/);
-  await waitFor(async () => (await sessions.get("main")).status === "attention_required");
+  // An expired limit interrupts the driver and probes it instead of abandoning it: a
+  // composer that answers leaves the session warm rather than forcing a restart.
+  assert.match(hangingDone.error, /back at its prompt/);
+  await waitFor(async () => (await sessions.get("main")).status === "ready", 15_000);
 
   await sessions.restart("main");
   const exiting = await sessions.submit("main", { message: "EXIT" });

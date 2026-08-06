@@ -18,6 +18,13 @@ function positiveNumber(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+// Zero is a meaningful setting for the turn limits: it disables one.
+function nonNegativeNumber(value, fallback) {
+  if (value === undefined || value === null || String(value).trim() === "") return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
 function configError(message) {
   const error = new Error(message);
   error.code = "EX_CONFIG";
@@ -59,7 +66,9 @@ function loadConfig(env = process.env, { requireTelegramProjectsRoot = false } =
     tmuxSocketName: String(env.CLI_RUNTIME_TMUX_SOCKET || "qozyai-cli-runtime").trim(),
     startupTimeoutMs: positiveNumber(env.CLI_RUNTIME_STARTUP_TIMEOUT_MS, 30_000),
     bindTimeoutMs: positiveNumber(env.CLI_RUNTIME_BIND_TIMEOUT_MS, 15_000),
-    submissionTimeoutMs: positiveNumber(env.CLI_RUNTIME_SUBMISSION_TIMEOUT_MS, 30 * 60_000),
+    submissionTimeoutMs: nonNegativeNumber(env.CLI_RUNTIME_SUBMISSION_TIMEOUT_MS, 0),
+    submissionInactivityMs: nonNegativeNumber(env.CLI_RUNTIME_SUBMISSION_INACTIVITY_MS, 30 * 60_000),
+    timeoutSettleMs: positiveNumber(env.CLI_RUNTIME_TIMEOUT_SETTLE_MS, 5000),
     artifactPollMs: positiveNumber(env.CLI_RUNTIME_ARTIFACT_POLL_MS, 150),
     navigator: {
       url: String(env.CLI_RUNTIME_NAVIGATOR_URL || "").trim(),

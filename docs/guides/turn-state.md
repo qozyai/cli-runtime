@@ -43,6 +43,15 @@ artifact cursor, provider session ID, three bounded reasoning chunks, three tool
 records shaped as `{id, tool, success, error}`, and a 500-character summary.
 Tool arguments and successful tool output are excluded.
 
+A bound turn is not limited by elapsed time. It ends on a terminal artifact
+record, driver exit, caller interrupt, or silence: thirty minutes by default with
+no new record on its bound artifact. The clock resets on provider records only,
+never on the runtime's own polling, and `lastProgressAt` reports where it stands.
+An expiring limit interrupts the driver and probes its composer before reporting;
+a driver that answers keeps its session `ready` and its conversation resumable,
+and one that does not leaves the session `attention_required`. No expiry path
+kills the pane. See `README.md` for the environment variables.
+
 At terminal completion, the whole submission outbox is atomically moved into
 history before it is inspected. Valid direct files are returned with stable
 output IDs and their exact names. Invalid, oversized, and excess entries are

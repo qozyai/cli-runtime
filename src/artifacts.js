@@ -38,16 +38,33 @@ function providerSessionIdFromPath(filePath) {
   return match ? match[1] : null;
 }
 
+function absoluteTimeout(timeoutMs) {
+  return Object.assign(new Error(`driver artifacts did not complete within ${timeoutMs}ms`), {
+    code: "SUBMISSION_ABSOLUTE_TIMEOUT",
+    reason: "absolute_timeout",
+  });
+}
+
+function inactivityTimeout(inactivityMs, lastActivityAt) {
+  return Object.assign(new Error(`driver produced no artifact activity for ${inactivityMs}ms`), {
+    code: "SUBMISSION_INACTIVITY_TIMEOUT",
+    reason: "inactivity_timeout",
+    lastActivityAt,
+  });
+}
+
 async function watchArtifacts({
   driver,
   rootDir,
   baseline,
   marker,
   timeoutMs,
+  inactivityMs = 0,
   pollMs,
   signal,
   onBound,
   onProgress,
+  onActivity,
   maxIncrementBytes = MAX_INCREMENT_BYTES,
 }) {
   const offsets = new Map(baseline || []);
@@ -55,9 +72,27 @@ async function watchArtifacts({
   const parser = createArtifactParser({ driver, marker });
   let boundFile = null;
   let lastProgressJson = "";
-  const deadline = Date.now() + timeoutMs;
+  // An absolute limit is opt-in. Silence, not age, ends a healthy turn.
+  const absoluteLimit = Number(timeoutMs) > 0 ? Number(timeoutMs) : 0;
+  const inactivityLimit = Number(inactivityMs) > 0 ? Number(inactivityMs) : 0;
+  const deadline = absoluteLimit ? Date.now() + absoluteLimit : Infinity;
+  let lastActivityAt = Date.now();
+  const inactivityDeadline = () => (inactivityLimit ? lastActivityAt + inactivityLimit : Infinity);
+  const expired = () => {
+    const now = Date.now();
+    if (now >= deadline) return absoluteTimeout(absoluteLimit);
+    if (now >= inactivityDeadline()) return inactivityTimeout(inactivityLimit, lastActivityAt);
+    return null;
+  };
+  // Only a new record on this turn's bound artifact proves the provider is working.
+  const noteActivity = () => {
+    lastActivityAt = Date.now();
+    onActivity?.(lastActivityAt);
+  };
 
-  while (Date.now() < deadline) {
+  for (;;) {
+    const expiry = expired();
+    if (expiry) throw expiry;
     if (signal?.aborted) throw new Error("submission interrupted");
     const files = boundFile ? [boundFile] : await listJsonlFiles(rootDir);
     for (const filePath of files) {
@@ -74,7 +109,8 @@ async function watchArtifacts({
       try {
         while (offset < stat.size) {
           if (signal?.aborted) throw new Error("submission interrupted");
-          if (Date.now() >= deadline) throw new Error(`driver artifacts did not complete within ${timeoutMs}ms`);
+          const readExpiry = expired();
+          if (readExpiry) throw readExpiry;
           const length = Math.min(stat.size - offset, maxIncrementBytes);
           const buffer = Buffer.alloc(length);
           const { bytesRead } = await handle.read(buffer, 0, length, offset);
@@ -107,6 +143,7 @@ async function watchArtifacts({
                 providerSessionId: parser.state.providerSessionId,
               });
             }
+            if (boundFile === filePath) noteActivity();
             if (!parsed) continue;
             const result = { ...parsed, throughOffset: offset };
             const progressJson = JSON.stringify(result);
@@ -123,7 +160,6 @@ async function watchArtifacts({
     }
     await sleepWithSignal(pollMs, signal);
   }
-  throw new Error(`driver artifacts did not complete within ${timeoutMs}ms`);
 }
 
 function publicProgress(progress, status = "running") {

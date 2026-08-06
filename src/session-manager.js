@@ -89,6 +89,7 @@ function publicSubmission(submission) {
     artifactEndOffset: Number.isFinite(submission.artifactEndOffset) ? submission.artifactEndOffset : null,
     acceptedAt: submission.acceptedAt,
     startedAt: submission.startedAt || null,
+    lastProgressAt: submission.lastProgressAt || null,
     completedAt: submission.completedAt || null,
   };
 }
@@ -447,6 +448,28 @@ class SessionManager {
     return { ok: false, error: "terminal input probe was not visible", screen };
   }
 
+  // Interrupt a turn that hit a limit and report whether the driver came back. The pane
+  // is never killed here: a stalled turn must not cost the session or its conversation.
+  async settleTimedOutDriver(session) {
+    await this.tmux.interrupt(session.tmuxSessionName).catch(() => {});
+    const deadline = Date.now() + (Number(this.config.timeoutSettleMs) > 0 ? Number(this.config.timeoutSettleMs) : 5000);
+    let reason = "driver did not return to its prompt";
+    while (Date.now() < deadline) {
+      if (typeof this.tmux.driverState === "function") {
+        const state = await this.tmux.driverState(session.tmuxSessionName).catch(() => ({ paneDead: true }));
+        if (state.paneDead) return { settled: false, reason: `driver exited (${state.exitCode ?? "unknown"})` };
+      }
+      const screen = await this.tmux.capture(session.tmuxSessionName, 80).catch(() => "");
+      if (isReady(session.driver, screen)) {
+        const probe = await this.probeReadyInput(session);
+        if (probe.ok) return { settled: true, reason: null };
+        reason = probe.error || reason;
+      }
+      await sleep(250);
+    }
+    return { settled: false, reason };
+  }
+
   async launch(session) {
     if (await this.tmux.has(session.tmuxSessionName)) {
       if (typeof this.tmux.hasAttachedClients === "function"
@@ -581,7 +604,10 @@ class SessionManager {
       outputs: [],
       outputError: null,
       marker,
-      timeoutMs: Number(timeoutMs) > 0 ? Number(timeoutMs) : this.config.submissionTimeoutMs,
+      // A caller's limit wins; otherwise the configured absolute limit, which is off by default.
+      timeoutMs: Number(timeoutMs) > 0 ? Number(timeoutMs)
+        : Number(this.config.submissionTimeoutMs) > 0 ? Number(this.config.submissionTimeoutMs) : 0,
+      inactivityMs: Number(this.config.submissionInactivityMs) > 0 ? Number(this.config.submissionInactivityMs) : 0,
       reply: null,
       error: null,
       progress: null,
@@ -590,6 +616,7 @@ class SessionManager {
       artifactEndOffset: null,
       acceptedAt,
       startedAt: null,
+      lastProgressAt: null,
       completedAt: null,
     };
     const controller = new AbortController();
@@ -735,6 +762,7 @@ class SessionManager {
     const baseline = await baselineArtifacts(rootDir);
     submission.status = "running";
     submission.startedAt = nowIso();
+    submission.lastProgressAt = submission.startedAt;
     await this.updateWorkspaceTurn({
       workspace: session.workspace,
       sessionKey: session.sessionKey,
@@ -763,8 +791,10 @@ class SessionManager {
         baseline,
         marker: submission.marker,
         timeoutMs: submission.timeoutMs,
+        inactivityMs: submission.inactivityMs,
         pollMs: this.config.artifactPollMs,
         signal: watchController.signal,
+        onActivity: (at) => { submission.lastProgressAt = new Date(at).toISOString(); },
         onBound: async ({ artifactPath, providerSessionId }) => {
           observed.bound = true;
           submission.artifactPath = artifactPath;
@@ -886,7 +916,14 @@ class SessionManager {
       watchController.abort();
       await Promise.allSettled([artifactPromise, terminalPromise].filter(Boolean));
       const status = activeRuntime.interrupted || err.code === "SUBMISSION_INTERRUPTED" ? "interrupted" : "failed";
-      const error = tailText(err.message || String(err), 20_000);
+      // A turn limit expiring says nothing about the driver, which is still running the
+      // turn. Stop it and observe where it landed before reporting anything.
+      const timedOut = status === "failed"
+        && ["SUBMISSION_ABSOLUTE_TIMEOUT", "SUBMISSION_INACTIVITY_TIMEOUT"].includes(err.code);
+      const settle = timedOut && session.status !== "closed" ? await this.settleTimedOutDriver(session) : null;
+      const error = tailText(timedOut
+        ? `${err.message}; ${settle.settled ? "driver interrupted and back at its prompt" : `driver did not settle: ${settle.reason}`}`
+        : err.message || String(err), 20_000);
       await this.finalizeSubmission(session, submission, {
         status,
         error,
@@ -895,9 +932,20 @@ class SessionManager {
         artifactEndOffset: submission.progress?.throughOffset || null,
       });
       this.active.delete(session.sessionKey);
+      if (timedOut) {
+        await this.eventStore.append("submission.timed_out", {
+          sessionKey: session.sessionKey,
+          submissionId: submission.submissionId,
+          reason: err.reason || "absolute_timeout",
+          lastProgressAt: submission.lastProgressAt || null,
+          settled: settle.settled,
+        });
+      }
       if (session.status !== "closed") {
         session.status = status === "interrupted" ? "ready"
-          : err.code === "AUTH_REQUIRED" ? "auth_required" : "attention_required";
+          : err.code === "AUTH_REQUIRED" ? "auth_required"
+          // A settled pane is warm and resumable; only an unsettled one needs recovery.
+          : timedOut && settle.settled ? "ready" : "attention_required";
         session.lastError = status === "interrupted" ? null : error;
         session.activeSubmissionId = null;
         session.lastSubmissionId = submission.submissionId;

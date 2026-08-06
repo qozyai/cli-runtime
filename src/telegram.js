@@ -114,6 +114,16 @@ function submissionMessage(message, repliedInputs = []) {
   return lines.join("\n");
 }
 
+function sinceLabel(iso) {
+  const at = Date.parse(String(iso || ""));
+  if (!Number.isFinite(at)) return null;
+  const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
 function commandFor(message) {
   const text = messageBody(message);
   const match = text.match(/^\/([a-z]+)(?:@\S+)?(?:\s+(.+))?$/i);
@@ -704,14 +714,24 @@ class TelegramAdapter {
       throw err;
     });
     const session = result?.session;
-    await this.send(message, [
+    const active = session?.activeSubmissionId
+      ? await this.runtime("GET", `/v1/submissions/${encodeURIComponent(session.activeSubmissionId)}`).catch(() => null)
+      : null;
+    const lines = [
       `Route: ${routeKey}`,
       `Project: ${route.project} (${availability})`,
       `Driver: ${route.driver}`,
       `Session: ${session?.status || "not started"}`,
       `Workspace: ${project?.path || "unavailable"}`,
       `Active submission: ${session?.activeSubmissionId || "none"}`,
-    ].join("\n"));
+    ];
+    // A turn has no wall-clock limit, so silence is the only thing worth watching.
+    const running = sinceLabel(active?.submission?.startedAt);
+    if (running) {
+      const idle = sinceLabel(active.submission.lastProgressAt);
+      lines.push(`Running for: ${running}${idle ? ` (last activity ${idle} ago)` : ""}`);
+    }
+    await this.send(message, lines.join("\n"));
   }
 
   async controlStop(message) {

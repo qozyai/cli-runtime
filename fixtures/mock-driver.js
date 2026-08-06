@@ -43,6 +43,22 @@ function complete(line) {
     else append({ type: "event_msg", payload: { type: "user_message", message: line } });
     return;
   }
+  // Binds, reports progress, then goes silent while staying at its composer.
+  if (clean.includes("STALL")) {
+    if (driver === "claude") {
+      append({ type: "user", sessionId, message: { role: "user", content: line } });
+      append({
+        type: "assistant",
+        sessionId,
+        message: { role: "assistant", content: [{ type: "thinking", thinking: "Stalling" }], stop_reason: "end_turn" },
+      });
+    } else {
+      append({ type: "event_msg", payload: { type: "user_message", message: line } });
+      append({ type: "event_msg", payload: { type: "agent_reasoning", text: "Stalling" } });
+    }
+    rl.prompt();
+    return;
+  }
   const indirect = clean.match(/^Read the complete UTF-8 user request from ("(?:[^"\\]|\\.)*") before taking any other action\./);
   let effective = clean;
   let reply;

@@ -119,6 +119,34 @@ Output acknowledgement accepts optional individual IDs:
 {"outputIds":["output-id"]}
 ```
 
+## Turn Lifetime
+
+A bound turn has no wall-clock limit. It ends when the provider artifact says the
+turn is terminal, when the driver process exits, when the caller interrupts it,
+or when it goes silent. Elapsed time alone never fails a turn, because it says
+nothing about whether the turn is healthy.
+
+Silence does. The inactivity clock starts when the turn binds to its artifact and
+resets on every new record parsed from that artifact. Polling, an unchanged file,
+a repeated identical progress checkpoint, and another session's artifact do not
+reset it. `lastProgressAt` on the submission reports when it last moved.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `CLI_RUNTIME_SUBMISSION_TIMEOUT_MS` | `0` | Absolute post-bind limit; `0` disables it. `timeoutMs` on a submission overrides it for that turn. |
+| `CLI_RUNTIME_SUBMISSION_INACTIVITY_MS` | `1800000` | Silence before a bound turn is treated as stuck; `0` disables stall detection. |
+| `CLI_RUNTIME_TIMEOUT_SETTLE_MS` | `5000` | Grace for the driver to return to its composer after the interrupt. |
+
+Startup and prompt-binding deadlines are unaffected; they detect failures before
+a turn is authoritatively bound.
+
+When a limit does expire, the runtime interrupts the driver, then probes it. If
+the composer answers, the session stays `ready`, the pane and the provider
+conversation survive, and the next message continues in the same session. If it
+does not, the session becomes `attention_required`. Either way the submission is
+`failed` with the reason and the silence duration, and a `submission.timed_out`
+event records whether the driver settled. No expiry path kills a pane.
+
 ## Authentication
 
 ```bash
