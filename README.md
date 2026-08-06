@@ -196,6 +196,18 @@ Set `OPENAI_API_KEY` to optionally transcribe audio with
 `gpt-4o-transcribe`. The original media is always submitted. Transcription
 failure is visible to the user and does not discard the media.
 
+Replying to a message carries that message into the prompt. Its text or caption
+is sent as a `<telegram-reply-context>` block ahead of `Current message:`;
+replying to one of the bot's own answers works too, because those are posted as
+rich messages and are flattened back to text. Attachments on the replied-to
+message are downloaded and submitted alongside the new message's own files,
+named `replied-<message-id>-<name>`, and replied-to audio is transcribed under a
+`Replied-to audio transcript:` label. A replied-to attachment larger than
+`CLI_RUNTIME_TELEGRAM_MAX_FILE_BYTES` fails the message before any submission
+starts, so nothing runs on partial context. Replying to a message that carries
+neither text nor attachments, such as a forum's topic-created service message,
+adds no context block.
+
 See [`docs/guides/telegram-projects.md`](docs/guides/telegram-projects.md) for
 project naming, switching, rename recovery, route state, and command behavior.
 
