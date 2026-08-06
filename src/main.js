@@ -103,13 +103,14 @@ async function runClient(config, args) {
     else print(await waitForSubmission(config, accepted.submission.submissionId));
     return;
   }
-  if (area === "session" && ["status", "output", "interrupt", "restart", "close", "attach"].includes(action)) {
+  if (area === "session" && ["status", "output", "interrupt", "restart", "release", "close", "attach"].includes(action)) {
     const sessionKey = rest[0];
     const encoded = encodeURIComponent(sessionKey);
     if (action === "status") print(await request(config.socketPath, "GET", `/v1/sessions/${encoded}`));
     if (action === "output") print(await request(config.socketPath, "GET", `/v1/sessions/${encoded}/output`));
     if (action === "interrupt") print(await request(config.socketPath, "POST", `/v1/sessions/${encoded}/interrupt`, {}));
     if (action === "restart") print(await request(config.socketPath, "POST", `/v1/sessions/${encoded}/restart`, {}));
+    if (action === "release") print(await request(config.socketPath, "POST", `/v1/sessions/${encoded}/release`, {}));
     if (action === "close") print(await request(config.socketPath, "DELETE", `/v1/sessions/${encoded}`));
     if (action === "attach") {
       const info = await request(config.socketPath, "GET", `/v1/sessions/${encoded}/attach`);
@@ -144,7 +145,7 @@ async function runClient(config, args) {
 
 async function runService(mode) {
   if (mode === "telegram") {
-    const config = loadConfig();
+    const config = loadConfig(process.env, { requireTelegramProjectsRoot: true });
     const adapterLock = await acquireRuntimeLock(path.join(config.stateDir, "telegram"));
     const openaiHelper = new OpenAIHelper({ config });
     const telegram = new TelegramAdapter({ config, openaiHelper });
@@ -183,7 +184,7 @@ async function main(argv = process.argv.slice(2)) {
 if (require.main === module) {
   main().catch((err) => {
     process.stderr.write(`cli-runtime: ${err.message}\n`);
-    process.exit(1);
+    process.exit(err.exitCode || (err.code === "EX_CONFIG" ? 78 : 1));
   });
 }
 

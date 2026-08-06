@@ -13,6 +13,8 @@ policy. A caller represents each independent execution lane with a session key.
 - one daemon exclusively owns each state directory
 - one Telegram adapter exclusively owns that state directory's ingress queue
 - one active submission per session; independent sessions remain concurrent
+- session-key reuse is bound to one canonical workspace and driver
+- runtime-owned panes are never restarted, released, or closed while a tmux client is attached
 - vendor JSONL artifacts, not terminal text, decide turn completion
 - terminal text is used only before submission for readiness, auth, and recovery
 - each turn clears and probes the editable composer before pasting the real prompt
@@ -21,6 +23,7 @@ policy. A caller represents each independent execution lane with a session key.
 - every submission owns exact inbox and outbox directories
 - event replay uses a bounded durable window with explicit cursor expiry
 - normalized history and file exchange live under `<workspace>/.qozyai`
+- a missing workspace is never recreated implicitly
 
 Raw provider artifacts and normalized workspace history can contain sensitive
 project data. Tool arguments are excluded from normalized history and events;
@@ -37,9 +40,9 @@ chmod +x install.sh
 ./install.sh
 ```
 
-The installer asks for the installation and working directories, selected
-driver, Telegram bot token, allowed chat IDs, and optional OpenAI transcription
-and navigation. It clones or safely updates the public repository, writes a
+The installer asks for the installation directory, Telegram projects root, selected
+driver, Telegram bot token, owner-enrollment private chat IDs, and optional
+OpenAI transcription and navigation. It clones or safely updates the public repository, writes a
 mode-`0600` environment file, installs `~/.local/bin/cli-runtime`, and launches
 the daemon and Telegram adapter. It uses user-level systemd when available and
 otherwise starts isolated tmux supervisors. Rerunning it updates the clone and
@@ -67,6 +70,7 @@ cli-runtime session output main
 cli-runtime session interrupt main
 cli-runtime session attach main
 cli-runtime session restart main
+cli-runtime session release main
 cli-runtime session close main
 ```
 
@@ -94,6 +98,7 @@ POST   /v1/sessions/:sessionKey/submissions
 GET    /v1/sessions/:sessionKey/output
 POST   /v1/sessions/:sessionKey/interrupt
 POST   /v1/sessions/:sessionKey/restart
+POST   /v1/sessions/:sessionKey/release
 GET    /v1/sessions/:sessionKey/attach
 GET    /v1/submissions/:submissionId
 POST   /v1/submissions/:submissionId/outputs/ack
@@ -138,18 +143,50 @@ Telegram is a separate API-only process; start the daemon first:
 ```bash
 export TELEGRAM_BOT_TOKEN="..."
 export CLI_RUNTIME_TELEGRAM_DRIVER=claude
-export CLI_RUNTIME_TELEGRAM_WORKSPACE="$HOME/project"
+export CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT="$HOME/projects"
 export CLI_RUNTIME_TELEGRAM_ALLOWED_CHATS="12345,67890"
 cli-runtime telegram
 ```
 
 Accepted updates are persisted before Telegram's offset advances and replayed
-after adapter restart. Ordinary messages serialize per chat/topic. `/status`
-and `/stop` run immediately. `/reset` and `/driver` interrupt immediately, then
-act as ordered barriers before later messages on that route.
+after adapter restart. The configured root is a catalog: each selectable project
+is a direct child directory named with ASCII letters, digits, `_`, or `-`.
+Telegram commands never create directories. Use `/project` to list projects or
+`/project <name>` to select one in each chat or topic. Sessions start lazily on the first
+ordinary message and always run in the selected project, never the catalog root.
 
-`CLI_RUNTIME_TELEGRAM_ALLOWED_CHATS` fails closed: an empty value accepts no
-updates. List explicit chat IDs, or use `*` only for an intentionally public bot.
+The first accepted allowlisted private message binds its non-bot `from.id` as
+the permanent Telegram owner in private state at
+`<state-dir>/telegram/owner.json`. Before that enrollment, every update remains
+fail-closed through `CLI_RUNTIME_TELEGRAM_ALLOWED_CHATS`. Once bound, that owner
+is accepted in any private chat, group, or topic where Telegram delivers their
+message; group chat IDs need no separate configuration. Other
+senders are discarded before queue persistence, command handling, attachment
+download, route mutation, or agent submission. Invalid owner state stops adapter
+startup instead of making the bot claimable again.
+
+Only messages explicitly marked by Telegram as topic messages use a topic route;
+ordinary reply-thread IDs and a forum's General topic use the chat's `main`
+route. Ordinary messages serialize per route while different topics remain
+concurrent. `/status`, `/stop`, and bare `/project` run immediately. `/project <name>`,
+`/reset`, and `/driver` are ordered barriers and do not eagerly launch a pane.
+Switching projects releases the old pane but preserves its provider conversation
+for resumption when selected again.
+
+Only the bound owner can instruct a driver. The owner can start using the bot in
+a group without discovering its numeric chat ID or restarting the adapter;
+Telegram privacy settings still determine which group messages reach the bot.
+Group members can read prompts and replies, and Telegram may deliver their
+messages to an administrator bot even though the adapter discards them.
+Telegram topics remain visual and routing separation, not confidentiality
+boundaries. Binding the same project to two routes also runs two independent
+agents against one directory, so their edits can conflict.
+
+`CLI_RUNTIME_TELEGRAM_ALLOWED_CHATS` is the initial-owner enrollment boundary.
+Before an owner exists, an empty value accepts no updates; list the intended
+private chat ID. `*` allows the first private sender to claim a fresh state, so
+do not use it during enrollment. After enrollment, the durable owner ID replaces
+the chat allowlist as the admission boundary.
 
 Text, documents, photos, audio, voice, video, and video notes are accepted. Files are
 acknowledged individually after delivery; oversized or failed siblings are
@@ -158,6 +195,9 @@ reported without stranding successful files.
 Set `OPENAI_API_KEY` to optionally transcribe audio with
 `gpt-4o-transcribe`. The original media is always submitted. Transcription
 failure is visible to the user and does not discard the media.
+
+See [`docs/guides/telegram-projects.md`](docs/guides/telegram-projects.md) for
+project naming, switching, rename recovery, route state, and command behavior.
 
 ## Navigation
 

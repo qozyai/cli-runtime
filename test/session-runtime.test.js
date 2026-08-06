@@ -46,6 +46,7 @@ test("independent Claude and Codex sessions serialize their own submissions", as
   await sessions.init();
   t.after(async () => {
     await tmux.run(["kill-server"], { allowFailure: true });
+    await sessions.workspaceState.waitForPrunes();
     await fs.rm(root, { recursive: true, force: true });
   });
 
@@ -368,6 +369,7 @@ test("delayed artifact binding waits without repeatedly submitting Enter", async
   await manager.init();
   t.after(async () => {
     await tmux.run(["kill-server"], { allowFailure: true });
+    await manager.workspaceState.waitForPrunes();
     await fs.rm(root, { recursive: true, force: true });
   });
   await manager.create({ sessionKey: "delayed", driver: "claude", workspace });
@@ -416,6 +418,7 @@ test("submission waits for the pasted marker to reach the terminal before Enter"
   await manager.init();
   t.after(async () => {
     await tmux.run(["kill-server"], { allowFailure: true });
+    await manager.workspaceState.waitForPrunes();
     await fs.rm(root, { recursive: true, force: true });
   });
 

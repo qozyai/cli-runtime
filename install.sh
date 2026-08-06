@@ -145,7 +145,7 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 
 INSTALL_DIR=$(prompt "Install directory" "${CLI_RUNTIME_INSTALL_DIR:-$DEFAULT_INSTALL_DIR}")
-WORKSPACE=$(prompt "Working directory" "${CLI_RUNTIME_TELEGRAM_WORKSPACE:-$HOME/qozyai-workspace}")
+PROJECTS_ROOT=$(prompt "Projects root directory" "${CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT:-$HOME/qozyai-projects}")
 DEFAULT_DRIVER=$(prompt "Default driver (claude or codex)" "${CLI_RUNTIME_TELEGRAM_DRIVER:-claude}")
 DEFAULT_DRIVER=${DEFAULT_DRIVER,,}
 [[ "$DEFAULT_DRIVER" == "claude" || "$DEFAULT_DRIVER" == "codex" ]] || die "default driver must be claude or codex"
@@ -161,11 +161,11 @@ SELECTED_COMMAND=$CLAUDE_COMMAND
 command_available "$SELECTED_COMMAND" || die "$DEFAULT_DRIVER command is not executable: $SELECTED_COMMAND"
 
 TELEGRAM_TOKEN=$(prompt_secret "Telegram bot token" "${TELEGRAM_BOT_TOKEN:-}" 1)
-ALLOWED_CHATS=$(prompt "Allowed Telegram chat IDs (comma-separated, or *)" "${CLI_RUNTIME_TELEGRAM_ALLOWED_CHATS:-}")
+ALLOWED_CHATS=$(prompt "Private chat IDs allowed to enroll the Telegram owner (comma-separated, or *)" "${CLI_RUNTIME_TELEGRAM_ALLOWED_CHATS:-}")
 ALLOWED_CHATS=${ALLOWED_CHATS//[[:space:]]/}
-[[ -n "$ALLOWED_CHATS" ]] || die "at least one allowed Telegram chat ID is required"
+[[ -n "$ALLOWED_CHATS" ]] || die "at least one owner-enrollment private chat ID is required"
 if [[ "$ALLOWED_CHATS" != "*" && ! "$ALLOWED_CHATS" =~ ^-?[0-9]+(,-?[0-9]+)*$ ]]; then
-  die "allowed chats must be comma-separated numeric IDs or *"
+  die "owner-enrollment chats must be comma-separated numeric IDs or *"
 fi
 
 OPENAI_KEY=$(prompt_secret "OpenAI API key for optional audio transcription" "${OPENAI_API_KEY:-}" 0)
@@ -175,8 +175,11 @@ if [[ -n "$OPENAI_KEY" ]]; then
 fi
 
 INSTALL_DIR=$(expand_path "$INSTALL_DIR")
-WORKSPACE=$(expand_path "$WORKSPACE")
-mkdir -p "$WORKSPACE" "$BIN_DIR"
+[[ -n "$PROJECTS_ROOT" ]] || die "projects root must not be empty"
+PROJECTS_ROOT=$(expand_path "$PROJECTS_ROOT")
+[[ "$PROJECTS_ROOT" != "$HOME" ]] || die "projects root must not be the home directory"
+[[ "$PROJECTS_ROOT" != "/" ]] || die "projects root must not be the filesystem root"
+mkdir -p "$PROJECTS_ROOT" "$BIN_DIR"
 
 if [[ -d "$INSTALL_DIR/.git" ]]; then
   [[ -z "$(git -C "$INSTALL_DIR" status --porcelain)" ]] || die "existing install has local changes: $INSTALL_DIR"
@@ -201,7 +204,7 @@ umask 077
   env_line CLI_RUNTIME_CODEX_COMMAND "$CODEX_COMMAND"
   env_line CLI_RUNTIME_CODEX_HOME "$HOME"
   env_line CLI_RUNTIME_TELEGRAM_DRIVER "$DEFAULT_DRIVER"
-  env_line CLI_RUNTIME_TELEGRAM_WORKSPACE "$WORKSPACE"
+  env_line CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT "$PROJECTS_ROOT"
   env_line CLI_RUNTIME_TELEGRAM_ALLOWED_CHATS "$ALLOWED_CHATS"
   env_line TELEGRAM_BOT_TOKEN "$TELEGRAM_TOKEN"
   env_line OPENAI_API_KEY "$OPENAI_KEY"
@@ -231,6 +234,7 @@ Type=simple
 ExecStart="$BIN_PATH" daemon
 Restart=on-failure
 RestartSec=2
+KillMode=process
 UMask=0077
 
 [Install]
@@ -247,6 +251,7 @@ Type=simple
 ExecStart="$BIN_PATH" telegram
 Restart=on-failure
 RestartSec=2
+RestartPreventExitStatus=78
 UMask=0077
 
 [Install]
@@ -295,7 +300,7 @@ fi
 say ""
 say "Installed QozyAI CLI Runtime"
 say "  source:    $INSTALL_DIR"
-say "  workspace: $WORKSPACE"
+say "  projects:  $PROJECTS_ROOT"
 say "  config:    $ENV_FILE"
 say "  command:   $BIN_PATH"
 say ""

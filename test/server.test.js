@@ -70,6 +70,28 @@ test("Unix socket API exposes asynchronous sessions and durable long-poll events
   assert.equal(accepted.submission.status, "accepted");
   const completed = await waitForSubmission(config.socketPath, accepted.submission.submissionId);
   assert.match(completed.reply, /through api/);
+  await assert.rejects(
+    () => request(config.socketPath, "POST", "/v1/sessions", {
+      sessionKey: "api/main",
+      driver: "codex",
+      workspace,
+    }),
+    (error) => error.statusCode === 409 && error.code === "SESSION_IDENTITY_MISMATCH",
+  );
+  const released = await request(
+    config.socketPath,
+    "POST",
+    `/v1/sessions/${encodeURIComponent("api/main")}/release`,
+    {},
+  );
+  assert.equal(released.session.status, "stopped");
+  const resumed = await request(
+    config.socketPath,
+    "POST",
+    `/v1/sessions/${encodeURIComponent("api/main")}/restart`,
+    {},
+  );
+  assert.equal(resumed.session.status, "ready");
 
   const replay = await request(config.socketPath, "GET", `/v1/events?after=0&sessionKey=${encodeURIComponent("api/main")}`);
   assert.ok(replay.events.some((event) => event.type === "submission.completed"));

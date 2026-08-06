@@ -69,7 +69,7 @@ recursive: true })` on `<workspace>/.qozyai`, and `recursive: true` creates
 `<workspace>` itself. Reached from `collectOutputs`, `finishTurn`, and `prune`
 with the *recorded* workspace, it recreates a renamed-away project as an empty
 directory — after which the missing-path check never fires again (the path
-exists), `/projects` lists a phantom, and rename-back fails with `ENOTEMPTY`.
+exists), `/project` lists a phantom, and rename-back fails with `ENOTEMPTY`.
 Confirmed by probe against the real `WorkspaceState`.
 
 The same rule had to be extended to `/reset` and `/driver`. Both are
@@ -120,7 +120,7 @@ hand-editing that file is the documented recovery move for a wedged route.
   for a migration that is one release note. Only the fail-closed rule was kept,
   because `config.js` otherwise defaults the Telegram workspace to
   `process.cwd()`, which under systemd is `$HOME`.
-- **Bare `/project`.** A strict subset of `/projects` and `/status`.
+- **Bare `/project`.** The single read-only project-listing command.
 - **Four overlapping requirement lists** (test bullets, live steps, a matrix, and
   a gate) collapsed into one checklist that is simultaneously the specification,
   the test plan, and the gate.

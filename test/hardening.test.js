@@ -55,8 +55,13 @@ test("driver panes do not inherit runtime credentials", async (t) => {
     `test \"$HOME\" = \"${root}\"`,
     ...secretKeys.map((key) => `test -z \"$${key}\"`),
   ].join(" && ")], { HOME: root });
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  assert.equal((await tmux.driverState("driver")).exitCode, 0);
+  const deadline = Date.now() + 2000;
+  let state = await tmux.driverState("driver");
+  while (!state.paneDead && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    state = await tmux.driverState("driver");
+  }
+  assert.equal(state.exitCode, 0);
 });
 
 test("driver state waits for tmux to publish a dead pane exit status", async () => {

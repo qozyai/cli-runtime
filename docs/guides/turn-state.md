@@ -19,6 +19,11 @@ The runtime keeps portable, driver-neutral continuity under the workspace:
 The runtime adds `.qozyai/` to the repository-local Git exclude once per
 workspace. These files are private runtime state, not project source.
 
+The workspace itself must already be a direct directory. If it is renamed or
+removed, runtime operations fail with `WORKSPACE_MISSING`; no finalization,
+cleanup, or pruning path recreates it. Restoring the directory at the same
+canonical path makes its existing conversation state usable again.
+
 ## Submission Lifecycle
 
 The daemon creates the submission's directories before it submits the prompt.

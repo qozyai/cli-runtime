@@ -79,11 +79,15 @@ test("installer clones, protects configuration, and reruns idempotently", async 
   assert.equal(envStat.mode & 0o777, 0o600);
   const { stdout: savedValues } = await execFileAsync("bash", [
     "-c",
-    'source "$1"; printf "%s\\n%s\\n" "$CLI_RUNTIME_TELEGRAM_ALLOWED_CHATS" "$TELEGRAM_BOT_TOKEN"',
+    'source "$1"; printf "%s\\n%s\\n%s\\n" "$CLI_RUNTIME_TELEGRAM_ALLOWED_CHATS" "$TELEGRAM_BOT_TOKEN" "$CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT"',
     "installer-test",
     envPath,
   ]);
-  assert.equal(savedValues, `-100123,42\n${token}\n`);
+  assert.equal(savedValues, `-100123,42\n${token}\n${workspace}\n`);
+  assert.doesNotMatch(await fs.readFile(envPath, "utf8"), /CLI_RUNTIME_TELEGRAM_WORKSPACE/);
+  const installerText = await fs.readFile(path.join(project, "install.sh"), "utf8");
+  assert.match(installerText, /qozyai-cli-runtime-telegram\.service[\s\S]*RestartPreventExitStatus=78/);
+  assert.match(installerText, /qozyai-cli-runtime\.service[\s\S]*KillMode=process/);
 
   const second = await runInstaller(path.join(project, "install.sh"), "\n".repeat(8), env);
   assert.equal(second.code, 0, second.stderr);

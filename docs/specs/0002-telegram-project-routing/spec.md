@@ -2,7 +2,7 @@
 
 ## Status
 
-Planned, not implemented.
+Implemented in this repository.
 
 The configured Telegram directory becomes a projects root. Each direct child
 directory is an available project. Each Telegram forum topic can be bound to a
@@ -99,7 +99,7 @@ creates `telegram:<chat>:<thread>` in the one configured workspace.
 
 - No project is selected implicitly.
 - `/start` and ordinary messages explain that a project must be selected and
-  point to `/projects`.
+  point to `/project <name>`.
 - An unbound route must not create a session, download an attachment, write
   `.qozyai` under the projects root, or fall back to the root.
 - If the root has no projects, say where to create one without exposing
@@ -113,24 +113,23 @@ them; the documentation warns that simultaneous agents in one project conflict.
 
 | Command | Behavior |
 | --- | --- |
-| `/projects` | List available direct-child project names, mark the current selection, and show selection instructions. Never starts a session. |
+| `/project` | List available direct-child project names, mark the current selection, and show selection instructions. Never starts a session. |
 | `/project <name>` | Validate and bind/switch this route to the exact project name. Never starts the target session. The full remainder is the name; because names cannot contain whitespace, the existing parser's trim is harmless and no quoting or escaping scheme is needed. |
 | `/start` | Check authentication and binding readiness without starting a session; if unbound, guide project selection. |
 | `/status` | Route, project, driver, session status, resolved workspace, and active submission ID. Say so explicitly when unbound or missing. |
 | `/stop` | Cancel adapter preparation and interrupt the selected project's turn. Immediate, never queued. It does not release the pane, so the next message continues in a warm session. |
 | `/reset` | Permanently close the selected project's current conversation. Keep the binding and driver; the next ordinary message starts fresh. |
-| `/driver claude\|codex` | Change the route's driver. Preserve the binding, close an incompatible current session, and start nothing until the next ordinary message. |
+| `/driver claude\|codex` | Change the route's driver. Preserve the binding, close an incompatible current session, and start nothing until the next ordinary message. State explicitly that provider chat context is not transferred. |
 
-- `/project` with no argument behaves as `/projects`.
 - Unknown names leave the binding and current work untouched.
 - Selecting the already-active project or driver is an idempotent no-op and
   must not cancel, interrupt, release, or close current work.
 - Listing is sorted by byte value. Matching is exact and case-sensitive. The
   name charset makes byte order and display order the same thing, so there is no
   locale, collation, or normalization question to answer.
-- Invalid filesystem entries are omitted from `/projects` and logged. Their
+- Invalid filesystem entries are omitted from `/project` and logged. Their
   exact count is not part of the user-facing contract.
-- When the root holds directories excluded only by the name rule, `/projects`
+- When the root holds directories excluded only by the name rule, `/project`
   adds one generic line saying some directories are not selectable because of
   their names and giving the allowed charset. No count, no names, no paths. An
   operator who renames a directory to a legal name is the intended recovery, and
@@ -167,7 +166,7 @@ Add a small project-catalog component instead of scattering path checks through
 
    Non-ASCII letters are deliberately excluded. Linux does not normalize
    filename bytes, so NFC and NFD spellings of one name are two distinct
-   directories that render identically in `/projects`, and exact matching fails
+   directories that render identically in `/project`, and exact matching fails
    against whichever one the client did not send. Confusable scripts (Cyrillic
    `а` against Latin `a`) produce two listings that look the same while
    resolving to different working directories, and drivers run there with
@@ -191,7 +190,7 @@ the runtime and the providers associate sessions with that working directory:
 - A never-bound directory may be renamed freely.
 - If a bound directory disappears, preserve the binding, report the project as
   unavailable, and never close, replace, or recreate its session implicitly.
-  Ordinary messages, `/reset`, and `/driver` refuse. `/status`, `/projects`, and
+  Ordinary messages, `/reset`, and `/driver` refuse. `/status`, bare `/project`, and
   `/stop` remain usable, and an explicit switch to another valid project may
   release the old pane without ending its identity. Renaming the directory back
   therefore restores the resumable conversation with no recovery step.
@@ -249,7 +248,7 @@ as `config.telegram.projectsRoot` after canonical validation. There is one mode.
   the current directory, so an empty default would silently publish whatever
   directory the installer happened to run in.
 - The installer keeps creating the directory it prompts for, so a fresh install
-  begins with a valid but empty catalog. `/projects` must read as "no projects
+  begins with a valid but empty catalog. `/project` must read as "no projects
   yet, create one here" rather than as an error.
 
 There is no global cap on resident sessions. Residency is bounded structurally —
@@ -342,7 +341,7 @@ canonical workspace for inspection.
   })` otherwise fabricates the workspace from the turn-finalization paths
   (`collectOutputs`, `finishTurn`, `prune`), recreating a renamed-away project as
   an empty directory — which defeats the missing-path check, lists a phantom in
-  `/projects`, and blocks rename-back recovery with `ENOTEMPTY`.
+  `/project`, and blocks rename-back recovery with `ENOTEMPTY`.
 - Serialize create, restart, release, close, **and submission admission** per
   session key. Two concurrent creates for the same key wait on the same mutation
   chain; the later request then reuses the matching identity or receives 409.
@@ -485,12 +484,12 @@ watching the pane. Control commands never launch a replacement session.
 Other topics keep separate chains and continue running. `/status` resolves the
 active project at invocation time and remains immediate. `/stop` is immediate and
 never queued; it cancels preparation and interrupts, and queues nothing on the
-route chain. `/projects` is read-only and does not preempt.
+route chain. Bare `/project` is read-only and does not preempt.
 
 Before creating, restarting, submitting, resetting, or changing driver for a
 bound route, resolve its stored name against the live catalog. If the exact
 directory is missing, report the immutable-path requirement without touching the
-session. `/status` and `/projects` remain read-only, `/stop` may interrupt the
+session. `/status` and bare `/project` remain read-only, `/stop` may interrupt the
 recorded identity without accessing the workspace, and `/project`
 may switch to another valid target. This keeps recovery possible without making
 a missing project impossible to inspect, stop, or leave.
@@ -521,15 +520,21 @@ Failure rules:
 
 ## Security And Trust Boundary
 
-- Chat admission remains fail-closed through `CLI_RUNTIME_TELEGRAM_ALLOWED_CHATS`.
-- **Anyone who can post in an allowlisted chat can instruct the agent, and the
-  drivers run with `bypassPermissions` / `danger-full-access`.** Allowlist
-  membership is therefore equivalent to shell access as the runtime user. Topic
-  creation in a forum group is unprivileged, so topics are display separation,
-  not an authorization boundary. State both facts at the top of the operator
-  documentation; the catalog's path rules are routing correctness, not a
-  security boundary against a message that simply asks the agent to read a file.
-- Per-user Telegram ACLs are not added here.
+- Before owner enrollment, chat admission remains fail-closed through
+  `CLI_RUNTIME_TELEGRAM_ALLOWED_CHATS`. The first accepted allowlisted private
+  message atomically binds its non-bot numeric `from.id` in private adapter
+  state. Thereafter that owner is accepted in any private chat, group, or topic
+  where Telegram delivers their message, without a per-group chat allowlist.
+  Reject other senders before queue persistence, command preparation,
+  attachment download, route mutation, or submission. A malformed owner record
+  fails startup rather than reopening enrollment.
+- **The bound owner can instruct drivers running with `bypassPermissions` /
+  `danger-full-access`.** Protecting that Telegram account and the owner record
+  is therefore equivalent to protecting shell access as the runtime user.
+  Group members can still read prompts and replies. Topics are routing
+  separation, not a confidentiality boundary. The catalog's path rules are
+  routing correctness, not a security boundary against an authorized message
+  that simply asks the agent to read a file.
 - Project listings expose only accepted direct-child names, never absolute paths.
 - Error messages use project names, not daemon state paths, credentials, or raw
   filesystem exceptions.
@@ -562,7 +567,7 @@ Failure rules:
   these would be a permanent second code path bought for a single operator on a
   single afternoon.
 - A global source-tree lock for duplicate project bindings.
-- Per-user group permissions or Telegram administrator policy.
+- Managing Telegram group membership or administrator policy.
 - Changing provider artifact completion, driver readiness or process-health
   detection, workspace retention, file exchange, authentication, navigation, or
   transcription contracts.
@@ -629,8 +634,8 @@ command before it, and a hand-corrupted entry does not prevent startup.
 
 ### Phase 4: Telegram Commands, Tests, And Documentation
 
-Route-project session keys; lazy command behavior; `/projects`, `/project
-<name>`, and route barriers; the full-operation tracker; missing-path command
+Route-project session keys; lazy command behavior; `/project`, `/project <name>`,
+and route barriers; the full-operation tracker; missing-path command
 rules; everything in the checklist below; `README.md`, `docs/guides/turn-state.md`,
 and completing `docs/guides/telegram-projects.md`.
 
@@ -678,12 +683,12 @@ says. `R1+R2` marks the few lines that gate both releases.
 - `R2` topic replies, typing, progress, transcripts, errors, and files retain the
   correct `message_thread_id` **[live]**
 - `R2` an unbound route creates no session and downloads no attachments
-- `R2` `/projects` is deterministic, marks the current selection, and logs
+- `R2` bare `/project` is deterministic, marks the current selection, and logs
   omitted invalid entries without exposing filesystem details
 - `R2` a name matching `^[A-Za-z0-9_-]+$` binds exactly; every other name is
   rejected without changing the binding, including whitespace, dots, separators,
   control characters, and non-ASCII letters
-- `R2` a directory whose name the rule rejects is omitted from `/projects`, and
+- `R2` a directory whose name the rule rejects is omitted from `/project`, and
   the listing carries the generic name-rule line without naming or counting it
 
 **Path safety**
@@ -700,7 +705,7 @@ says. `R1+R2` marks the few lines that gate both releases.
 - `R2` renaming a never-bound directory makes only the new name selectable
 - `R2` renaming a bound directory makes it unavailable without retargeting or
   tearing down its identity; ordinary messages, `/reset`, and `/driver` refuse,
-  while `/status`, `/projects`, `/stop`, and switching away remain usable;
+  while `/status`, bare `/project`, `/stop`, and switching away remain usable;
   renaming back resumes the same conversation with its `providerSessionId`
   intact **[live]**
 - `R2` explicitly selecting a renamed path yields a distinct identity and a fresh
@@ -802,7 +807,7 @@ says. `R1+R2` marks the few lines that gate both releases.
   bot stops instead of restart-looping **[live]**
 - `R2` installer reruns preserve secrets and the projects root, and reject an
   empty root, `$HOME`, and `/`
-- `R2` a fresh install with an empty projects root answers `/projects` with
+- `R2` a fresh install with an empty projects root answers `/project` with
   guidance to create one, not an error
 - `R2` authenticated Claude and Codex both run in the correct project directory
   **[live]**
@@ -812,8 +817,9 @@ says. `R1+R2` marks the few lines that gate both releases.
   session workspace is the intended project directory, never the root **[live]**
 - `R2` each project's `.qozyai` history proves nothing was written into a sibling
   project or the root **[live]**
-- `R2` documentation states the allowlist trust boundary, the unprivileged nature
-  of topic creation, and the duplicate-binding conflict risk
+- `R2` documentation states the enrollment allowlist plus durable global-owner
+  boundary, group-message visibility, topic confidentiality limits, and
+  duplicate-binding conflict risk
 - `R1+R2` no credentials or private browser state appear in fixtures, logs, or
   commits
 - `R1+R2` all existing hardening, auth, Telegram, artifact, output, and

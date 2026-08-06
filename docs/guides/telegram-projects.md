@@ -1,119 +1,128 @@
 # Telegram Projects
 
-> **Status: planned, not implemented.** This describes the intended operator
-> contract for the Telegram project router specified in
-> [`../specs/0002-telegram-project-routing/spec.md`](../specs/0002-telegram-project-routing/spec.md). It is
-> completed and verified as part of that feature's final phase.
-
-The configured Telegram directory is a **projects root**. Each direct child
-directory is a **project**. A Telegram forum topic can be bound to a project, and
-a chat without topics has one active project selection you can switch.
+The configured Telegram directory is a **projects root**. Each selectable direct
+child directory is a **project**. A Telegram forum topic can be bound to one
+project, while a chat without topics has one active project selection.
 
 Claude Code or Codex always runs inside the selected project directory, never in
 the projects root.
 
 ## Trust boundary — read this first
 
-Anyone who can post in an allowlisted chat can instruct the agent, and the
-drivers run with permissions bypassed. **Allowlist membership is equivalent to
-shell access as the runtime user.** Topic creation in a forum group is
-unprivileged, so topics separate your work visually — they are not an
-authorization boundary. The project path rules keep routing correct; they do not
-stop a message that simply asks the agent to read a file elsewhere on the host.
+The first accepted allowlisted private message binds its numeric Telegram sender
+ID as the owner. Before enrollment, all other updates fail closed. After
+enrollment, only that owner can instruct the agent in any private chat, group,
+or topic where Telegram delivers their message; group chat IDs require no
+separate configuration. All other senders are discarded before the durable
+queue or any side effect. The drivers still run with permissions bypassed, so
+protect the owner account and private runtime state. Group members can read
+prompts and replies, and topics separate work visually; they are not a
+confidentiality boundary. Project path validation keeps routing correct, but
+cannot stop the owner from asking the agent to read another host path.
 
-Two routes bound to the same project run independent agents in the same
-directory. Nothing serializes their edits, so they can conflict.
+Owner state is stored at `<state-dir>/telegram/owner.json` with mode `0600`.
+Malformed owner state fails adapter startup rather than reopening first-use
+enrollment. To intentionally rebind, stop the adapter first, preserve an audit
+copy of the old record, remove it, and send the new owner's allowlisted private
+message before using the bot in a group.
 
-## Creating a project
+Two routes may bind the same project. They then run independent agents in the
+same directory. Nothing serializes their edits, so they can conflict.
 
-Project creation is a filesystem action. Telegram commands never create, clone,
-move, or delete directories.
+## Configuration
 
-To create a project, make a direct child directory under the projects root. To
-start a fresh conversation inside an existing project, use `/reset` — that does
-not create anything.
+Set an existing, dedicated directory:
 
-### In a direct chat with the bot
+```bash
+export CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT="$HOME/projects"
+```
 
-1. On the runtime host, create `<projects-root>/Arctic Project` and initialize or
-   clone its repository as needed.
-2. Send `/projects` to confirm `Arctic Project` is discoverable.
-3. Send `/project Arctic Project` to make it active.
-4. Send your first work request. The tmux and provider session are created
-   lazily.
+The adapter exits with status `78` when this variable is absent, empty, the
+runtime user's home directory, `/`, missing, or not a directory. There is no
+single-workspace compatibility mode and `CLI_RUNTIME_TELEGRAM_WORKSPACE` is not
+read. Create the root and move or clone projects beneath it before starting the
+adapter.
 
-### In a forum-enabled group
+Project names must match `^[A-Za-z0-9_-]+$`. Matching is exact and
+case-sensitive. Files, sockets, symbolic links, nested directories, whitespace,
+dots, separators, control characters, and non-ASCII names are not selectable.
+Commands reject invalid names rather than sanitizing them.
 
-1. Create the project directory under the projects root as above.
-2. Create a Telegram topic for it using the normal Telegram UI.
-3. Inside that topic, send `/project Arctic Project` once to persist the binding.
-4. Send work requests in that topic.
+Telegram commands never create, clone, rename, move, or delete project
+directories. Create a project on the host, for example:
 
-Creating a topic does not create a directory, and creating a directory does not
-bind a topic.
+```bash
+mkdir -p "$CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT/api"
+```
+
+## Routes and topics
+
+A topic route exists only when Telegram marks the message with
+`is_topic_message: true` and supplies `message_thread_id`. A bare thread ID on an
+ordinary reply is ignored. Messages in a forum's General topic therefore use
+the chat's `main` route, as do private chats and non-forum groups.
+
+Every route stores its own project and driver. Different routes can run
+concurrently; work within one route is ordered. Replies, progress, typing,
+errors, transcripts, and output files use the same normalized topic identity.
 
 ## Commands
 
 | Command | Behavior |
 | --- | --- |
-| `/projects` | List projects, mark the current selection, show how to select. Never starts a session. |
-| `/project <name>` | Bind or switch this route to the exact project name. Spaces and Unicode work as typed. |
-| `/start` | Check authentication, or guide project selection if unbound. |
-| `/status` | Route, project, driver, session status, resolved workspace, active submission. |
-| `/stop` | Interrupt the current turn for this route. The agent stays running, so your next message continues immediately. |
-| `/reset` | Fresh conversation in the selected project. Keeps the binding and driver. |
-| `/driver claude\|codex` | Change the driver, keeping the binding. |
+| `/project` | List selectable direct-child projects and mark the current selection. Never starts a session. |
+| `/project <name>` | Bind or switch this route to the exact project name. |
+| `/start` | Check authentication and binding readiness without starting a session. |
+| `/status` | Show route, project availability, driver, session status, workspace, and active submission. |
+| `/stop` | Cancel adapter preparation or interrupt the exact accepted turn. The pane stays resident. |
+| `/reset` | Permanently close this route-project conversation. The next ordinary message starts fresh. |
+| `/driver claude\|codex` | Change the driver, close an incompatible conversation, and start nothing until the next ordinary message. Provider chat context is not transferred across the change. |
 
-Matching is exact and case-sensitive. Unknown names change nothing.
+Unknown and invalid project names change nothing. Selecting the current project
+or driver is an idempotent no-op and does not interrupt work. Bare `/project`,
+`/status`, and `/stop` are immediate; project selection, reset, and driver
+changes are ordered barriers before later messages.
 
-## Switching projects
+## Switching and residency
 
-A route holds one running agent at a time. Switching from A to B lets A's current
-turn finish, then stops A's process. Switching back to A restarts it in the same
-directory and **resumes the same conversation** — you lose a few seconds, not
-your context.
+A route has at most one resident pane. Switching from `api` to `web` cancels or
+settles `api` work, releases its pane, persists the new binding, and does not
+start `web`. The first ordinary message starts or resumes `web` lazily. Switching
+back resumes `api` from its saved provider conversation ID.
 
-Different topics are different routes, so they run in parallel and never
-interrupt each other. Each keeps its own running agent, so a chat with many
-active topics keeps that many agents alive — switching projects within a route is
-what frees one.
+`/stop` does not release a pane. A project switch is the only Telegram action
+that does. If a human is attached to a pane, project switch, `/reset`, and a real
+driver change refuse without changing state. Detach with `Ctrl-b d` and retry.
 
-## Renaming a project directory
+## Renames, replacement, and recovery
 
-A bound project's path is effectively immutable while its conversation matters,
-because both the runtime and the providers key their session on that directory.
+A bound project's canonical path is its identity while its conversation
+matters.
 
-- Renaming a **never-bound** directory is free.
-- Renaming a **bound** directory makes it unavailable. The binding is kept and
-  nothing is torn down, so **renaming it back restores the conversation
-  immediately**. Messages, `/reset`, and `/driver` all refuse with the same
-  message until you do.
-- Selecting the renamed directory under its **new** name is a new project with a
-  fresh conversation. The old one still resumes if that exact path comes back.
+- Renaming a never-bound directory simply changes the selectable name.
+- Renaming a bound directory makes that project unavailable without deleting or
+  retargeting its session. Restore the exact name to resume it, or explicitly
+  select another valid project.
+- Selecting the renamed directory under its new name creates a distinct session.
+  Restoring and selecting the old path still resumes the old conversation.
+- Deleting a directory and creating a different directory at the same path
+  inherits the old conversation. Use `/reset` when that history is stale. The
+  router deliberately writes no identity marker into project directories.
 
-## Recovering a wedged route
+While a bound project is unavailable, ordinary messages, `/reset`, and
+`/driver` refuse. `/status`, bare `/project`, `/stop`, and switching to another valid
+project remain usable. A missing project and a missing projects root are reported
+separately.
 
-Bindings live in `<state>/telegram/routes.json`. The adapter caches them in
-memory and rewrites the whole file, so **stop the adapter first**, then edit,
-then restart. Editing while it runs loses your change at the next mutation.
+## Durable state and inspection
 
-An entry that fails validation is moved to `routes.invalid.<timestamp>.json` and
-logged by route key; the adapter starts with the remaining routes.
+Bindings live in mode-`0600` `<state>/telegram/routes.json`. Each mutation is a
+field-level merge serialized through one atomic write chain. Malformed JSON is
+quarantined as a whole; schema-invalid entries are quarantined individually and
+valid routes continue loading. There is no legacy route-file reader or route-key
+migration.
 
-To inspect a project's agent directly, use the session list and attach APIs — the
-per-project tmux session runs on the named `cli-runtime-live` socket.
-
-## Rolling back
-
-Restore `routes.json` from your backup and point the Telegram workspace variable
-at a **project** directory, never at the projects root. The route file format is
-a superset of the older one, so bindings survive a downgrade; an older build
-simply ignores the `project` field.
-
-## Configuration
-
-`CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT` sets the projects root. If Telegram is
-enabled and this is not set, the adapter refuses to start with exit status 78
-rather than running in whatever directory it happened to launch from. Existing
-single-workspace installs migrate by pointing this variable at the parent of the
-old workspace.
+Use `cli-runtime session list` to inspect runtime records and
+`cli-runtime session attach <session-key>` to inspect a resident pane. The local
+runtime API is protected by its mode-`0600` Unix socket, not application-level
+authentication.

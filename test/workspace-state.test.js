@@ -12,8 +12,12 @@ async function fixture(t, config = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-workspace-"));
   const workspace = path.join(root, "workspace");
   await fs.mkdir(workspace);
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
-  return { root, workspace, state: new WorkspaceState({ config }) };
+  const state = new WorkspaceState({ config });
+  t.after(async () => {
+    await state.waitForPrunes();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  return { root, workspace, state };
 }
 
 function submission(id, status = "completed") {

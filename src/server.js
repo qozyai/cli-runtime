@@ -83,6 +83,10 @@ function createServer({ config, sessions, auth, eventStore, ownershipLock = null
           sendJson(res, 200, { ok: true, session: await sessions.restart(sessionKey) });
           return;
         }
+        if (parts[3] === "release" && req.method === "POST") {
+          sendJson(res, 200, { ok: true, session: await sessions.release(sessionKey) });
+          return;
+        }
         if (parts[3] === "attach" && req.method === "GET") {
           sendJson(res, 200, { ok: true, ...(await sessions.attachInfo(sessionKey)) });
           return;
@@ -129,10 +133,10 @@ function createServer({ config, sessions, auth, eventStore, ownershipLock = null
       }
       sendJson(res, 404, { ok: false, error: "not found" });
     } catch (err) {
-      const status = err.code === "SESSION_BUSY" ? 409
+      const status = ["SESSION_BUSY", "SESSION_ATTACHED", "SESSION_IDENTITY_MISMATCH"].includes(err.code) ? 409
         : err.code === "AUTH_REQUIRED" ? 401
           : err.code === "EVENT_CURSOR_EXPIRED" ? 410
-            : err.code === "SESSION_NOT_FOUND" ? 404 : 400;
+            : ["SESSION_NOT_FOUND", "WORKSPACE_MISSING"].includes(err.code) ? 404 : 400;
       sendJson(res, status, { ok: false, error: err.message || String(err), code: err.code || null });
     }
   }
@@ -173,6 +177,7 @@ function createServer({ config, sessions, auth, eventStore, ownershipLock = null
       if (!server) return;
       await new Promise((resolve) => server.close(resolve));
       server = null;
+      await sessions.workspaceState?.waitForPrunes?.();
       await fs.rm(config.socketPath, { force: true });
       await runtimeLock?.release();
       runtimeLock = null;

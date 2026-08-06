@@ -23,6 +23,7 @@ function request(socketPath, method, requestPath, body = null) {
         if ((res.statusCode || 500) >= 400) {
           const err = new Error(parsed.error || `HTTP ${res.statusCode}`);
           err.statusCode = res.statusCode;
+          err.code = parsed.code || null;
           err.body = parsed;
           reject(err);
           return;

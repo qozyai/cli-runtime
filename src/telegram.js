@@ -5,12 +5,15 @@ const path = require("node:path");
 const { request } = require("./client");
 const { readJson, sleep, writeAtomic } = require("./util");
 const { mimeTypeFor, safeFilename } = require("./progress");
+const { ProjectCatalog, validProjectName } = require("./project-catalog");
+const { OwnerStore } = require("./owner-store");
+const { RouteStore } = require("./route-store");
 
 const TELEGRAM_DOCUMENT_LIMIT = 50 * 1024 * 1024;
 const TERMINAL_SUBMISSION_STATES = new Set(["completed", "failed", "interrupted"]);
-const CONTROL_COMMANDS = new Set(["status", "stop", "reset", "driver"]);
+const CONTROL_COMMANDS = new Set(["project", "status", "stop", "reset", "driver"]);
 const IMMEDIATE_COMMANDS = new Set(["status", "stop"]);
-const BARRIER_COMMANDS = new Set(["reset", "driver"]);
+const BARRIER_COMMANDS = new Set(["project", "reset", "driver"]);
 const TELEGRAM_REQUEST_TIMEOUT_MS = 30_000;
 const TELEGRAM_RICH_MESSAGE_LIMIT = 32_768;
 
@@ -22,14 +25,120 @@ function chunks(text, max = 4000) {
   return result;
 }
 
+function richTextValue(value) {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map(richTextValue).join("");
+  if (!value || typeof value !== "object") return "";
+  if (value.type === "custom_emoji") return String(value.alternative_text || "");
+  if (value.type === "mathematical_expression") return String(value.expression || "");
+  return richTextValue(value.text);
+}
+
+function richCaptionValue(caption) {
+  if (!caption || typeof caption !== "object") return "";
+  return [richTextValue(caption.text), richTextValue(caption.credit)].filter(Boolean).join("\n");
+}
+
+function richBlocksValue(blocks) {
+  if (!Array.isArray(blocks)) return "";
+  return blocks.map(richBlockValue).filter(Boolean).join("\n");
+}
+
+function richBlockValue(block) {
+  if (!block || typeof block !== "object") return "";
+  if (["paragraph", "heading", "pre", "footer", "thinking"].includes(block.type)) {
+    return richTextValue(block.text);
+  }
+  if (block.type === "divider") return "---";
+  if (block.type === "mathematical_expression") return String(block.expression || "");
+  if (block.type === "anchor") return "";
+  if (block.type === "list") {
+    return (Array.isArray(block.items) ? block.items : []).map((item) => {
+      const content = richBlocksValue(item?.blocks);
+      const label = String(item?.label || "-").trim();
+      return content ? `${label} ${content}`.trim() : "";
+    }).filter(Boolean).join("\n");
+  }
+  if (block.type === "blockquote") {
+    return [richBlocksValue(block.blocks), richTextValue(block.credit)].filter(Boolean).join("\n");
+  }
+  if (block.type === "pullquote") {
+    return [richTextValue(block.text), richTextValue(block.credit)].filter(Boolean).join("\n");
+  }
+  if (["collage", "slideshow"].includes(block.type)) {
+    return [richBlocksValue(block.blocks), richCaptionValue(block.caption)].filter(Boolean).join("\n");
+  }
+  if (block.type === "table") {
+    const rows = (Array.isArray(block.cells) ? block.cells : []).map((row) => (
+      (Array.isArray(row) ? row : []).map((cell) => richTextValue(cell?.text)).join(" | ")
+    )).filter(Boolean);
+    return [richTextValue(block.caption), ...rows].filter(Boolean).join("\n");
+  }
+  if (block.type === "details") {
+    return [richTextValue(block.summary), richBlocksValue(block.blocks)].filter(Boolean).join("\n");
+  }
+  if (["map", "animation", "audio", "photo", "video", "voice_note"].includes(block.type)) {
+    return richCaptionValue(block.caption);
+  }
+  return [
+    richTextValue(block.text),
+    richTextValue(block.summary),
+    richBlocksValue(block.blocks),
+    richCaptionValue(block.caption),
+  ].filter(Boolean).join("\n");
+}
+
+function richMessageValue(message) {
+  return richBlocksValue(message?.rich_message?.blocks).trim();
+}
+
+function messageBody(message) {
+  return String(message?.text || message?.caption || richMessageValue(message)).trim();
+}
+
+function submissionMessage(message, repliedInputs = []) {
+  const current = messageBody(message);
+  const replied = message?.reply_to_message;
+  if (!replied) return current;
+  const repliedText = messageBody(replied);
+  if (!repliedText && repliedInputs.length === 0) return current;
+
+  const lines = ["<telegram-reply-context>"];
+  if (repliedText) lines.push("Replied-to message text:", repliedText);
+  if (repliedInputs.length > 0) {
+    if (repliedText) lines.push("");
+    lines.push("Replied-to message attachments included with this request:");
+    for (const input of repliedInputs) lines.push(`- ${input.name}`);
+  }
+  lines.push("</telegram-reply-context>", "", "Current message:", current || "(No text supplied.)");
+  return lines.join("\n");
+}
+
 function commandFor(message) {
-  const text = String(message?.text || message?.caption || "").trim();
+  const text = messageBody(message);
   const match = text.match(/^\/([a-z]+)(?:@\S+)?(?:\s+(.+))?$/i);
   return match ? { name: match[1].toLowerCase(), argument: String(match[2] || "").trim() } : null;
 }
 
+function topicThreadId(message) {
+  return message?.is_topic_message === true && message.message_thread_id !== undefined
+    && message.message_thread_id !== null ? message.message_thread_id : null;
+}
+
+function routeOperationCancelled() {
+  return Object.assign(new Error("route operation cancelled"), { code: "ROUTE_OPERATION_CANCELLED" });
+}
+
 class TelegramAdapter {
-  constructor({ config, openaiHelper = null, fetchImpl = fetch, log = console.error }) {
+  constructor({
+    config,
+    openaiHelper = null,
+    fetchImpl = fetch,
+    log = console.error,
+    catalog = null,
+    routeStore = null,
+    ownerStore = null,
+  }) {
     this.config = config;
     this.fetch = fetchImpl;
     this.openaiHelper = openaiHelper;
@@ -39,10 +148,13 @@ class TelegramAdapter {
     this.telegramDir = path.join(config.stateDir, "telegram");
     this.queueDir = path.join(this.telegramDir, "queue");
     this.offsetPath = path.join(this.telegramDir, "offset.json");
-    this.routesPath = path.join(this.telegramDir, "routes.json");
-    this.legacyRoutesPath = path.join(config.stateDir, "telegram-routes.json");
-    this.routes = {};
+    this.catalog = catalog || new ProjectCatalog({ root: config.telegram.projectsRoot, log });
+    this.routeStore = routeStore || new RouteStore({ stateDir: config.stateDir, log });
+    this.ownerStore = ownerStore || new OwnerStore({ stateDir: config.stateDir, log });
     this.chains = new Map();
+    this.routeSequences = new Map();
+    this.pendingBarriers = new Map();
+    this.activeOperationByRoute = new Map();
     this.inflightUpdates = new Set();
     this.retryCounts = new Map();
   }
@@ -50,10 +162,9 @@ class TelegramAdapter {
   async init() {
     if (!this.config.telegram.token) throw new Error("TELEGRAM_BOT_TOKEN required");
     await fs.mkdir(this.queueDir, { recursive: true, mode: 0o700 });
-    this.routes = await readJson(this.routesPath, null) || await readJson(this.legacyRoutesPath, {});
-    if (Object.keys(this.routes).length > 0 && !await readJson(this.routesPath, null)) {
-      await writeAtomic(this.routesPath, this.routes);
-    }
+    await this.ownerStore.init();
+    await this.catalog.init();
+    await this.routeStore.init();
     this.offset = Number((await readJson(this.offsetPath, {})).offset || 0);
     const queued = (await fs.readdir(this.queueDir).catch(() => []))
       .filter((name) => name.endsWith(".json"))
@@ -61,7 +172,8 @@ class TelegramAdapter {
     for (const name of queued) {
       const filePath = path.join(this.queueDir, name);
       const update = await readJson(filePath, null);
-      if (update?.message) this.dispatch(update, filePath);
+      if (update?.message && await this.acceptedMessage(update)) this.dispatch(update, filePath);
+      else await fs.rm(filePath, { force: true });
     }
   }
 
@@ -84,11 +196,26 @@ class TelegramAdapter {
   }
 
   routeKey(message) {
-    return `${message.chat.id}:${message.message_thread_id || "main"}`;
+    return `${message.chat.id}:${topicThreadId(message) ?? "main"}`;
   }
 
-  sessionKey(message) {
-    return `telegram:${this.routeKey(message)}`;
+  routeState(message) {
+    return this.routeStore.get(this.routeKey(message)) || Object.freeze({
+      driver: this.config.telegram.defaultDriver,
+    });
+  }
+
+  sessionKeyFor(routeKey, projectPath) {
+    return `telegram:${routeKey}:${projectPath}`;
+  }
+
+  sessionKey(message, projectPath) {
+    return this.sessionKeyFor(this.routeKey(message), projectPath);
+  }
+
+  topicFields(message) {
+    const threadId = topicThreadId(message);
+    return threadId === null ? {} : { message_thread_id: threadId };
   }
 
   async send(message, text) {
@@ -96,7 +223,7 @@ class TelegramAdapter {
     for (const part of chunks(text)) {
       sent.push(await this.api("sendMessage", {
         chat_id: message.chat.id,
-        message_thread_id: message.message_thread_id || undefined,
+        ...this.topicFields(message),
         text: part || " ",
         disable_web_page_preview: true,
       }));
@@ -107,7 +234,7 @@ class TelegramAdapter {
   async sendStatus(message, text = "Working.") {
     return this.api("sendMessage", {
       chat_id: message.chat.id,
-      message_thread_id: message.message_thread_id || undefined,
+      ...this.topicFields(message),
       text,
       disable_web_page_preview: true,
     });
@@ -148,7 +275,7 @@ class TelegramAdapter {
   async typing(message) {
     await this.api("sendChatAction", {
       chat_id: message.chat.id,
-      message_thread_id: message.message_thread_id || undefined,
+      ...this.topicFields(message),
       action: "typing",
     }).catch(() => {});
   }
@@ -168,19 +295,26 @@ class TelegramAdapter {
     return lines.join("\n");
   }
 
-  async ensureSession(message, driver) {
-    const key = encodeURIComponent(this.sessionKey(message));
+  async ensureSession(message, driver, project) {
+    const sessionKey = this.sessionKey(message, project.path);
+    const key = encodeURIComponent(sessionKey);
     try {
       const current = await this.runtime("GET", `/v1/sessions/${key}`);
-      if (current.session.driver === driver && current.session.status !== "closed") return current.session;
-      await this.runtime("DELETE", `/v1/sessions/${key}`);
+      if (current.session.status !== "closed") {
+        if (current.session.driver !== driver || current.session.workspace !== project.path) {
+          const error = new Error("runtime session identity does not match the selected project");
+          error.code = "SESSION_IDENTITY_MISMATCH";
+          throw error;
+        }
+        return current.session;
+      }
     } catch (err) {
       if (err.statusCode !== 404) throw err;
     }
     const created = await this.runtime("POST", "/v1/sessions", {
-      sessionKey: this.sessionKey(message),
+      sessionKey,
       driver,
-      workspace: this.config.telegram.workspace,
+      workspace: project.path,
     });
     return created.session;
   }
@@ -232,13 +366,17 @@ class TelegramAdapter {
     return null;
   }
 
-  async downloadInputs(message) {
+  async downloadInputs(message, signal = null) {
     const file = this.telegramFile(message);
     if (!file) return [];
+    if (signal?.aborted) throw routeOperationCancelled();
     const maxFileBytes = this.config.telegram.maxFileBytes || 20 * 1024 * 1024;
     if (Number(file.size) > maxFileBytes) throw new Error(`Telegram file exceeds ${maxFileBytes} bytes`);
     const remote = await this.api("getFile", { file_id: file.fileId });
+    if (signal?.aborted) throw routeOperationCancelled();
     const controller = new AbortController();
+    const forwardAbort = () => controller.abort();
+    signal?.addEventListener("abort", forwardAbort, { once: true });
     const timer = setTimeout(() => controller.abort(), this.config.telegram.requestTimeoutMs || TELEGRAM_REQUEST_TIMEOUT_MS);
     let bytes;
     try {
@@ -247,9 +385,14 @@ class TelegramAdapter {
       });
       if (!response.ok) throw new Error(`Telegram file download failed (${response.status})`);
       bytes = Buffer.from(await response.arrayBuffer());
+    } catch (err) {
+      if (signal?.aborted) throw routeOperationCancelled();
+      throw err;
     } finally {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", forwardAbort);
     }
+    if (signal?.aborted) throw routeOperationCancelled();
     if (bytes.length > maxFileBytes) throw new Error(`Telegram file exceeds ${maxFileBytes} bytes`);
     const dir = path.join(this.telegramDir, "inputs");
     await fs.mkdir(dir, { recursive: true, mode: 0o700 });
@@ -266,6 +409,10 @@ class TelegramAdapter {
         this.log(`[telegram] ${transcriptionError}`);
       }
     }
+    if (signal?.aborted) {
+      await fs.rm(sourcePath, { force: true });
+      throw routeOperationCancelled();
+    }
     return [{
       sourcePath,
       name,
@@ -274,6 +421,25 @@ class TelegramAdapter {
       transcriptionError,
       temporary: true,
     }];
+  }
+
+  async downloadRepliedInputs(message, signal = null) {
+    const replied = message?.reply_to_message;
+    if (!replied || !this.telegramFile(replied)) return [];
+    try {
+      const inputs = await this.downloadInputs({ ...replied, chat: replied.chat || message.chat }, signal);
+      const messageId = String(replied.message_id ?? "unknown");
+      return inputs.map((input) => ({
+        ...input,
+        name: safeFilename(`replied-${messageId}-${input.name}`, `replied-${messageId}`),
+        replyContext: true,
+      }));
+    } catch (err) {
+      if (err.code === "ROUTE_OPERATION_CANCELLED") throw err;
+      const wrapped = new Error(`Could not include replied-to attachment: ${err.message}`);
+      wrapped.code = err.code;
+      throw wrapped;
+    }
   }
 
   async sendFile(message, output) {
@@ -292,7 +458,8 @@ class TelegramAdapter {
     const bytes = await fs.readFile(filePath);
     const form = new FormData();
     form.append("chat_id", String(message.chat.id));
-    if (message.message_thread_id) form.append("message_thread_id", String(message.message_thread_id));
+    const threadId = topicThreadId(message);
+    if (threadId !== null) form.append("message_thread_id", String(threadId));
     form.append("document", new Blob([bytes], { type: output.mimeType || mimeTypeFor(output.originalName) }), output.originalName);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.config.telegram.requestTimeoutMs || TELEGRAM_REQUEST_TIMEOUT_MS);
@@ -310,142 +477,498 @@ class TelegramAdapter {
     }
   }
 
-  async control(message, route, command, { preempted = false } = {}) {
-    const key = encodeURIComponent(this.sessionKey(message));
-    if (command.name === "driver") {
-      const driver = command.argument.toLowerCase();
-      if (!["claude", "codex"].includes(driver)) {
-        await this.send(message, "Choose /driver claude or /driver codex.");
-        return;
-      }
-      if (!preempted) await this.runtime("POST", `/v1/sessions/${key}/interrupt`, {}).catch(() => {});
-      await this.runtime("DELETE", `/v1/sessions/${key}`).catch(() => {});
-      route.driver = driver;
-      this.routes[this.routeKey(message)] = route;
-      await writeAtomic(this.routesPath, this.routes);
-      await this.send(message, `${driver === "claude" ? "Claude Code" : "Codex"} selected.`);
+  projectUnavailableText(projectName) {
+    return `Project "${projectName}" is unavailable. Restore that exact directory name to resume its conversation, or select another project with /project <name>.`;
+  }
+
+  async sendCatalogError(message, error, projectName = null) {
+    if (error?.code === "PROJECTS_ROOT_UNAVAILABLE") {
+      await this.send(message, "The configured projects root is unavailable. Ask the operator to restore it.");
       return;
     }
-    if (command.name === "status") {
-      try {
-        const result = await this.runtime("GET", `/v1/sessions/${key}`);
-        const detail = result.session.activeSubmissionId ? ` (${result.session.activeSubmissionId})` : "";
-        await this.send(message, `Status: ${result.session.status}${detail}`);
-      } catch {
-        await this.send(message, "No session has started yet.");
-      }
+    if (error?.code === "PROJECT_NAME_INVALID") {
+      await this.send(message, "Project names may use only ASCII letters, digits, underscore, and hyphen.");
       return;
     }
-    if (command.name === "stop") {
-      try {
-        const result = await this.runtime("POST", `/v1/sessions/${key}/interrupt`, {});
-        await this.send(message, result.interrupted ? "Stop requested." : "Nothing is running.");
-      } catch (err) {
-        if (err.statusCode === 404) await this.send(message, "Nothing is running.");
-        else throw err;
-      }
+    if (error?.code === "PROJECT_MISSING" && projectName) {
+      await this.send(message, this.projectUnavailableText(projectName));
       return;
     }
-    if (command.name === "reset") {
-      if (!preempted) await this.runtime("POST", `/v1/sessions/${key}/interrupt`, {}).catch(() => {});
-      const deadline = Date.now() + 10_000;
-      while (Date.now() < deadline) {
-        const current = await this.runtime("GET", `/v1/sessions/${key}`).catch(() => null);
-        if (!current?.session?.activeSubmissionId) break;
-        await sleep(100);
+    await this.send(message, `Project "${projectName || "requested"}" is not selectable.`);
+  }
+
+  async listProjects(message) {
+    const route = this.routeState(message);
+    let listing;
+    try {
+      listing = await this.catalog.list();
+    } catch (err) {
+      await this.sendCatalogError(message, err);
+      return;
+    }
+    const lines = [];
+    if (listing.projects.length === 0) {
+      lines.push("No projects are available yet. Create a direct child directory in the configured projects root, then send /project again.");
+    } else {
+      lines.push("Projects:");
+      for (const project of listing.projects) {
+        lines.push(`- ${project.name}${route.project === project.name ? " (selected)" : ""}`);
       }
-      await this.runtime("DELETE", `/v1/sessions/${key}`).catch(() => {});
-      await this.ensureSession(message, route.driver);
-      await this.send(message, "New conversation started.");
+      lines.push("", "Select one with /project <name>.");
+    }
+    if (listing.hasInvalidNames) {
+      lines.push("", "Some directories are not selectable because names may use only ASCII letters, digits, underscore, and hyphen.");
+    }
+    await this.send(message, lines.join("\n"));
+  }
+
+  sessionIdentity(message, projectName) {
+    const projectPath = this.catalog.identityPath(projectName);
+    return {
+      projectPath,
+      sessionKey: this.sessionKey(message, projectPath),
+    };
+  }
+
+  async sessionAttached(sessionKey) {
+    try {
+      const result = await this.runtime("GET", `/v1/sessions/${encodeURIComponent(sessionKey)}/attach`);
+      return result.attached === true;
+    } catch (err) {
+      if (err.statusCode === 404) return false;
+      throw err;
     }
   }
 
-  async handle(message) {
-    const text = String(message.text || message.caption || "").trim();
-    const attached = this.telegramFile(message);
-    if (!text && !attached) return;
+  async cancelActiveOperation(message, { fallbackToSelected = false } = {}) {
     const routeKey = this.routeKey(message);
-    const route = this.routes[routeKey] || { driver: this.config.telegram.defaultDriver };
-    const command = commandFor(message);
-    if (command && CONTROL_COMMANDS.has(command.name)) return this.control(message, route, command);
+    const operation = this.activeOperationByRoute.get(routeKey);
+    if (operation) {
+      operation.cancelled = true;
+      operation.controller.abort();
+      if (operation.submissionId) {
+        await this.runtime("POST", `/v1/sessions/${encodeURIComponent(operation.sessionKey)}/interrupt`, {}).catch((err) => {
+          if (err.statusCode !== 404) throw err;
+        });
+      }
+      return { cancelled: true, sessionKey: operation.sessionKey };
+    }
+    if (fallbackToSelected) {
+      const route = this.routeState(message);
+      if (route.project) {
+        const { sessionKey } = this.sessionIdentity(message, route.project);
+        const result = await this.runtime("POST", `/v1/sessions/${encodeURIComponent(sessionKey)}/interrupt`, {}).catch((err) => {
+          if (err.statusCode === 404) return { interrupted: false };
+          throw err;
+        });
+        return { cancelled: Boolean(result.interrupted), sessionKey };
+      }
+    }
+    return { cancelled: false, sessionKey: null };
+  }
 
-    if (command?.name === "start") {
-      const status = await this.runtime("GET", `/v1/auth/${route.driver}/status`);
-      if (status.auth.state === "unknown") {
-        await this.send(message, `Could not verify ${route.driver === "claude" ? "Claude Code" : "Codex"} authentication: ${status.auth.error || "unknown error"}`);
-        return;
+  async settleSession(sessionKey, timeoutMs = 10_000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const current = await this.runtime("GET", `/v1/sessions/${encodeURIComponent(sessionKey)}`).catch((err) => {
+        if (err.statusCode === 404) return null;
+        throw err;
+      });
+      if (!current?.session?.activeSubmissionId) return;
+      await sleep(100);
+    }
+  }
+
+  barrierWouldPreempt(operation, command) {
+    if (command.name === "reset") return true;
+    if (command.name === "project") return command.argument !== operation.project;
+    if (command.name === "driver") return command.argument.toLowerCase() !== operation.driver;
+    return false;
+  }
+
+  addPendingBarrier(routeKey, ordinal, command) {
+    const record = { ordinal, command };
+    const pending = this.pendingBarriers.get(routeKey) || [];
+    pending.push(record);
+    this.pendingBarriers.set(routeKey, pending);
+    return record;
+  }
+
+  removePendingBarrier(routeKey, record) {
+    if (!record) return;
+    const pending = (this.pendingBarriers.get(routeKey) || []).filter((item) => item !== record);
+    if (pending.length) this.pendingBarriers.set(routeKey, pending);
+    else this.pendingBarriers.delete(routeKey);
+  }
+
+  async prepareBarrier(message, command, ordinal) {
+    if (command.name === "project") {
+      if (!command.argument) return { listOnly: true };
+      if (!validProjectName(command.argument)) return { validationError: "name" };
+      try {
+        await this.catalog.resolve(command.argument);
+      } catch (error) {
+        return { catalogError: error };
       }
-      if (!status.auth.authenticated) {
-        await this.send(message, await this.authMessage(route.driver));
-        return;
+    }
+    if (command.name === "driver" && !["claude", "codex"].includes(command.argument.toLowerCase())) {
+      return { validationError: "driver" };
+    }
+    const route = this.routeState(message);
+    const requestedDriver = command.argument.toLowerCase();
+    const routeKey = this.routeKey(message);
+    const hasEarlierBarrier = (this.pendingBarriers.get(routeKey) || [])
+      .some((record) => record.ordinal < ordinal);
+    const idempotent = command.name === "project" ? route.project === command.argument
+      : command.name === "driver" ? route.driver === requestedDriver : false;
+    if (idempotent && !hasEarlierBarrier) return { idempotent: true };
+    if ((command.name === "reset" || command.name === "driver") && route.project) {
+      try {
+        await this.catalog.resolve(route.project);
+      } catch (error) {
+        return { catalogError: error, currentProject: route.project };
       }
-      await this.ensureSession(message, route.driver);
-      await this.send(message, `${route.driver === "claude" ? "Claude Code" : "Codex"} is ready.`);
+    }
+    if (route.project) {
+      const { sessionKey } = this.sessionIdentity(message, route.project);
+      if (await this.sessionAttached(sessionKey)) return { attached: true };
+    }
+    const pendingBarrier = this.addPendingBarrier(routeKey, ordinal, command);
+    try {
+      const active = this.activeOperationByRoute.get(routeKey);
+      if (command.name !== "project" || !active || active.project !== command.argument) {
+        await this.cancelActiveOperation(message, { fallbackToSelected: true });
+      }
+      return { preempted: true, pendingBarrier };
+    } catch (err) {
+      this.removePendingBarrier(routeKey, pendingBarrier);
+      throw err;
+    }
+  }
+
+  async controlProject(message, command, preparation = {}) {
+    if (!command.argument || preparation.listOnly) return this.listProjects(message);
+    if (preparation.validationError === "name") return this.sendCatalogError(message, { code: "PROJECT_NAME_INVALID" });
+    if (preparation.catalogError) return this.sendCatalogError(message, preparation.catalogError, command.argument);
+    if (preparation.attached) {
+      await this.send(message, "A tmux client is attached to this route's session. Detach it and retry the project switch.");
       return;
     }
+    let target;
+    try {
+      target = await this.catalog.resolve(command.argument);
+    } catch (err) {
+      await this.sendCatalogError(message, err, command.argument);
+      return;
+    }
+    const routeKey = this.routeKey(message);
+    const route = this.routeState(message);
+    if (route.project === target.name) {
+      await this.send(message, `Project "${target.name}" is already selected.`);
+      return;
+    }
+    if (route.project) {
+      const previous = this.sessionIdentity(message, route.project);
+      await this.settleSession(previous.sessionKey);
+      try {
+        await this.runtime("POST", `/v1/sessions/${encodeURIComponent(previous.sessionKey)}/release`, {});
+      } catch (err) {
+        if (err.statusCode === 409 && err.code === "SESSION_ATTACHED") {
+          await this.send(message, "A tmux client is attached to this route's session. Detach it and retry the project switch.");
+          return;
+        }
+        if (err.statusCode !== 404) throw err;
+      }
+    }
+    await this.routeStore.update(routeKey, { driver: route.driver, project: target.name });
+    await this.send(message, `Project "${target.name}" selected with ${route.driver === "claude" ? "Claude Code" : "Codex"}.`);
+  }
 
-    let session = await this.ensureSession(message, route.driver);
-    if (session.status === "auth_required") {
+  async controlStatus(message) {
+    const routeKey = this.routeKey(message);
+    const route = this.routeState(message);
+    if (!route.project) {
+      await this.send(message, `Route: ${routeKey}\nProject: unbound\nDriver: ${route.driver}\nSession: not started\nSelect a project with /project <name>.`);
+      return;
+    }
+    let project = null;
+    let availability = "available";
+    try {
+      project = await this.catalog.resolve(route.project);
+    } catch (err) {
+      availability = err.code === "PROJECTS_ROOT_UNAVAILABLE" ? "projects root unavailable" : "project unavailable";
+    }
+    const identity = this.sessionIdentity(message, route.project);
+    const result = await this.runtime("GET", `/v1/sessions/${encodeURIComponent(identity.sessionKey)}`).catch((err) => {
+      if (err.statusCode === 404) return null;
+      throw err;
+    });
+    const session = result?.session;
+    await this.send(message, [
+      `Route: ${routeKey}`,
+      `Project: ${route.project} (${availability})`,
+      `Driver: ${route.driver}`,
+      `Session: ${session?.status || "not started"}`,
+      `Workspace: ${project?.path || "unavailable"}`,
+      `Active submission: ${session?.activeSubmissionId || "none"}`,
+    ].join("\n"));
+  }
+
+  async controlStop(message) {
+    const stopped = await this.cancelActiveOperation(message, { fallbackToSelected: true });
+    await this.send(message, stopped.cancelled ? "Stop requested." : "Nothing is running.");
+  }
+
+  async controlReset(message, preparation = {}) {
+    const route = this.routeState(message);
+    if (!route.project) {
+      await this.send(message, "No project is selected. Use /project <name> first.");
+      return;
+    }
+    if (preparation.catalogError) return this.sendCatalogError(message, preparation.catalogError, route.project);
+    if (preparation.attached) {
+      await this.send(message, "A tmux client is attached to this route's session. Detach it and retry /reset.");
+      return;
+    }
+    try {
+      await this.catalog.resolve(route.project);
+    } catch (err) {
+      await this.sendCatalogError(message, err, route.project);
+      return;
+    }
+    const { sessionKey } = this.sessionIdentity(message, route.project);
+    await this.settleSession(sessionKey);
+    try {
+      await this.runtime("DELETE", `/v1/sessions/${encodeURIComponent(sessionKey)}`);
+    } catch (err) {
+      if (err.statusCode === 409 && err.code === "SESSION_ATTACHED") {
+        await this.send(message, "A tmux client is attached to this route's session. Detach it and retry /reset.");
+        return;
+      }
+      if (err.statusCode !== 404) throw err;
+    }
+    await this.send(message, `Conversation reset for project "${route.project}". The next message starts fresh.`);
+  }
+
+  async controlDriver(message, command, preparation = {}) {
+    const driver = command.argument.toLowerCase();
+    if (preparation.validationError === "driver" || !["claude", "codex"].includes(driver)) {
+      await this.send(message, "Choose /driver claude or /driver codex.");
+      return;
+    }
+    const route = this.routeState(message);
+    if (route.driver === driver) {
+      await this.send(message, `${driver === "claude" ? "Claude Code" : "Codex"} is already selected.`);
+      return;
+    }
+    if (preparation.catalogError) return this.sendCatalogError(message, preparation.catalogError, route.project);
+    if (preparation.attached) {
+      await this.send(message, "A tmux client is attached to this route's session. Detach it and retry the driver change.");
+      return;
+    }
+    if (route.project) {
+      try {
+        await this.catalog.resolve(route.project);
+      } catch (err) {
+        await this.sendCatalogError(message, err, route.project);
+        return;
+      }
+      const { sessionKey } = this.sessionIdentity(message, route.project);
+      await this.settleSession(sessionKey);
+      const current = await this.runtime("GET", `/v1/sessions/${encodeURIComponent(sessionKey)}`).catch((err) => {
+        if (err.statusCode === 404) return null;
+        throw err;
+      });
+      if (current?.session?.status !== "closed" && current?.session?.driver !== driver) {
+        try {
+          await this.runtime("DELETE", `/v1/sessions/${encodeURIComponent(sessionKey)}`);
+        } catch (err) {
+          if (err.statusCode === 409 && err.code === "SESSION_ATTACHED") {
+            await this.send(message, "A tmux client is attached to this route's session. Detach it and retry the driver change.");
+            return;
+          }
+          if (err.statusCode !== 404) throw err;
+        }
+      }
+    }
+    await this.routeStore.update(this.routeKey(message), { driver, ...(route.project ? { project: route.project } : {}) });
+    const selectedLabel = driver === "claude" ? "Claude Code" : "Codex";
+    const previousLabel = route.driver === "claude" ? "Claude Code" : "Codex";
+    await this.send(message, `${selectedLabel} selected. The next message starts or resumes its own conversation lazily; ${previousLabel} chat context is not transferred.`);
+  }
+
+  async control(message, command, preparation = {}) {
+    if (command.name === "project" && !command.argument) return this.listProjects(message);
+    if (command.name === "project") return this.controlProject(message, command, preparation);
+    if (command.name === "status") return this.controlStatus(message);
+    if (command.name === "stop") return this.controlStop(message);
+    if (command.name === "reset") return this.controlReset(message, preparation);
+    if (command.name === "driver") return this.controlDriver(message, command, preparation);
+    return undefined;
+  }
+
+  checkOperation(operation) {
+    if (operation.cancelled || operation.controller.signal.aborted) throw routeOperationCancelled();
+  }
+
+  async handleStart(message) {
+    const route = this.routeState(message);
+    if (!route.project) {
+      await this.send(message, "No project is selected. Use /project <name>.");
+      return;
+    }
+    try {
+      await this.catalog.resolve(route.project);
+    } catch (err) {
+      await this.sendCatalogError(message, err, route.project);
+      return;
+    }
+    const status = await this.runtime("GET", `/v1/auth/${route.driver}/status`);
+    if (status.auth.state === "unknown") {
+      await this.send(message, `Could not verify ${route.driver === "claude" ? "Claude Code" : "Codex"} authentication: ${status.auth.error || "unknown error"}`);
+      return;
+    }
+    if (!status.auth.authenticated) {
       await this.send(message, await this.authMessage(route.driver));
       return;
     }
-    if (["stopped", "attention_required", "failed"].includes(session.status)) {
-      const restarted = await this.runtime("POST", `/v1/sessions/${encodeURIComponent(this.sessionKey(message))}/restart`, {});
-      session = restarted.session;
+    await this.send(message, `Project "${route.project}" is selected and ${route.driver === "claude" ? "Claude Code" : "Codex"} is authenticated. Send a message to start lazily.`);
+  }
+
+  async handleOrdinary(message, route, ordinal = 0) {
+    if (!route.project) {
+      await this.send(message, "No project is selected. Use /project <name>.");
+      return;
+    }
+    const routeKey = this.routeKey(message);
+    const projectPath = this.catalog.identityPath(route.project);
+    const operation = {
+      routeKey,
+      project: route.project,
+      driver: route.driver,
+      sessionKey: this.sessionKeyFor(routeKey, projectPath),
+      submissionId: null,
+      cancelled: false,
+      controller: new AbortController(),
+    };
+    this.activeOperationByRoute.set(routeKey, operation);
+    let inputs = [];
+    try {
+      const laterBarrier = (this.pendingBarriers.get(routeKey) || [])
+        .find((record) => record.ordinal > ordinal && this.barrierWouldPreempt(operation, record.command));
+      if (laterBarrier) {
+        operation.cancelled = true;
+        operation.controller.abort();
+      }
+      this.checkOperation(operation);
+      const project = await this.catalog.resolve(route.project);
+      this.checkOperation(operation);
+      let session = await this.ensureSession(message, route.driver, project);
+      this.checkOperation(operation);
       if (session.status === "auth_required") {
         await this.send(message, await this.authMessage(route.driver));
         return;
       }
-    }
-    if (session.status !== "ready") {
-      await this.send(message, `The ${route.driver === "claude" ? "Claude Code" : "Codex"} session needs attention: ${session.lastError || session.status}`);
-      return;
-    }
-    const inputs = await this.downloadInputs(message);
-    let accepted;
-    try {
-      for (const input of inputs) {
-        if (input.transcript) await this.send(message, `Your voice transcript:\n${input.transcript}`);
-        if (input.transcriptionError) await this.send(message, input.transcriptionError);
+      if (["stopped", "attention_required", "failed"].includes(session.status)) {
+        const restarted = await this.runtime("POST", `/v1/sessions/${encodeURIComponent(operation.sessionKey)}/restart`, {});
+        this.checkOperation(operation);
+        session = restarted.session;
+        if (session.status === "auth_required") {
+          await this.send(message, await this.authMessage(route.driver));
+          return;
+        }
       }
-      accepted = await this.runtime("POST", `/v1/sessions/${encodeURIComponent(this.sessionKey(message))}/submissions`, {
-        message: text,
-        inputs: inputs.map(({ temporary, transcriptionError, ...input }) => ({ ...input, transcriptionError })),
-        idempotencyKey: `telegram:${message.chat.id}:${message.message_id}`,
-      });
-    } finally {
-      await Promise.all(inputs.filter((input) => input.temporary).map((input) => fs.rm(input.sourcePath, { force: true })));
-    }
-    await this.typing(message);
-    const statusMessage = await this.sendStatus(message);
-    const completed = await this.waitSubmission(message, accepted.submission.submissionId, statusMessage?.message_id);
-    if (completed.status === "interrupted") {
-      await this.finalizeStatus(message, statusMessage?.message_id, "Interrupted.");
-      return;
-    }
-    if (completed.status !== "completed") {
-      const current = await this.runtime("GET", `/v1/sessions/${encodeURIComponent(this.sessionKey(message))}`);
-      if (current.session.status === "auth_required") {
-        await this.finalizeStatus(message, statusMessage?.message_id, await this.authMessage(route.driver));
+      if (session.status !== "ready") {
+        await this.send(message, `The ${route.driver === "claude" ? "Claude Code" : "Codex"} session needs attention: ${session.lastError || session.status}`);
         return;
       }
-    }
-    await this.finalizeStatus(message, statusMessage?.message_id,
-      completed.status === "completed" ? completed.reply : `(model error: ${completed.error})`);
-    if (completed.outputError) await this.send(message, `Output warning: ${completed.outputError}`);
-    const pending = completed.status === "completed"
-      ? (completed.outputs || []).filter((output) => output.deliveryStatus === "pending")
-      : [];
-    for (const output of pending) {
-      try {
-        await this.sendFile(message, output);
-        await this.runtime("POST", `/v1/submissions/${encodeURIComponent(completed.submissionId)}/outputs/ack`, {
-          outputIds: [output.outputId],
-        });
-      } catch (err) {
-        await this.send(message, `Could not deliver ${output.originalName}: ${err.message}`);
+      inputs.push(...await this.downloadInputs(message, operation.controller.signal));
+      this.checkOperation(operation);
+      const repliedInputs = await this.downloadRepliedInputs(message, operation.controller.signal);
+      inputs.push(...repliedInputs);
+      this.checkOperation(operation);
+      for (const input of inputs) {
+        if (input.transcript) {
+          const label = input.replyContext ? "Replied-to audio transcript:" : "Your voice transcript:";
+          await this.send(message, `${label}\n${input.transcript}`);
+        }
+        this.checkOperation(operation);
+        if (input.transcriptionError) {
+          const warning = input.replyContext
+            ? `Replied-to media warning: ${input.transcriptionError}` : input.transcriptionError;
+          await this.send(message, warning);
+        }
+        this.checkOperation(operation);
       }
+      const accepted = await this.runtime("POST", `/v1/sessions/${encodeURIComponent(operation.sessionKey)}/submissions`, {
+        message: submissionMessage(message, repliedInputs),
+        inputs: inputs.map(({ temporary, replyContext, transcriptionError, ...input }) => ({ ...input, transcriptionError })),
+        idempotencyKey: `telegram:${message.chat.id}:${message.message_id}`,
+      });
+      operation.submissionId = accepted.submission.submissionId;
+      if (operation.cancelled || operation.controller.signal.aborted) {
+        await this.runtime("POST", `/v1/sessions/${encodeURIComponent(operation.sessionKey)}/interrupt`, {}).catch((err) => {
+          if (err.statusCode !== 404) throw err;
+        });
+      }
+      this.checkOperation(operation);
+      await this.typing(message);
+      this.checkOperation(operation);
+      const statusMessage = await this.sendStatus(message);
+      const completed = await this.waitSubmission(message, operation.submissionId, statusMessage?.message_id);
+      this.checkOperation(operation);
+      if (completed.status === "interrupted") {
+        await this.finalizeStatus(message, statusMessage?.message_id, "Interrupted.");
+        return;
+      }
+      if (completed.status !== "completed") {
+        const current = await this.runtime("GET", `/v1/sessions/${encodeURIComponent(operation.sessionKey)}`);
+        this.checkOperation(operation);
+        if (current.session.status === "auth_required") {
+          await this.finalizeStatus(message, statusMessage?.message_id, await this.authMessage(route.driver));
+          return;
+        }
+      }
+      await this.finalizeStatus(message, statusMessage?.message_id,
+        completed.status === "completed" ? completed.reply : `(model error: ${completed.error})`);
+      this.checkOperation(operation);
+      if (completed.outputError) await this.send(message, `Output warning: ${completed.outputError}`);
+      const pending = completed.status === "completed"
+        ? (completed.outputs || []).filter((output) => output.deliveryStatus === "pending") : [];
+      for (const output of pending) {
+        this.checkOperation(operation);
+        try {
+          await this.sendFile(message, output);
+          this.checkOperation(operation);
+          await this.runtime("POST", `/v1/submissions/${encodeURIComponent(completed.submissionId)}/outputs/ack`, {
+            outputIds: [output.outputId],
+          });
+        } catch (err) {
+          if (err.code === "ROUTE_OPERATION_CANCELLED") throw err;
+          await this.send(message, `Could not deliver ${output.originalName}: ${err.message}`);
+        }
+      }
+    } catch (err) {
+      if (err.code === "ROUTE_OPERATION_CANCELLED") return;
+      if (["PROJECT_MISSING", "PROJECTS_ROOT_UNAVAILABLE", "PROJECT_INVALID"].includes(err.code)) {
+        await this.sendCatalogError(message, err, route.project);
+        return;
+      }
+      throw err;
+    } finally {
+      await Promise.all(inputs.filter((input) => input.temporary).map((input) => fs.rm(input.sourcePath, { force: true })));
+      if (this.activeOperationByRoute.get(routeKey) === operation) this.activeOperationByRoute.delete(routeKey);
     }
+  }
+
+  async handle(message, { preparation = {}, ordinal = 0 } = {}) {
+    const text = messageBody(message);
+    const attached = this.telegramFile(message);
+    if (!text && !attached) return;
+    const command = commandFor(message);
+    if (command && CONTROL_COMMANDS.has(command.name)) return this.control(message, command, preparation);
+    if (command?.name === "start") return this.handleStart(message);
+    return this.handleOrdinary(message, this.routeState(message), ordinal);
   }
 
   dispatch(update, queuePath = null) {
@@ -453,7 +976,11 @@ class TelegramAdapter {
     if (this.inflightUpdates.has(id)) return;
     this.inflightUpdates.add(id);
     const message = update.message;
+    const routeKey = this.routeKey(message);
+    const ordinal = (this.routeSequences.get(routeKey) || 0) + 1;
+    this.routeSequences.set(routeKey, ordinal);
     const command = commandFor(message);
+    const listsProjects = command?.name === "project" && !command.argument;
     const run = async (operation = () => this.handle(message)) => {
       try {
         await operation();
@@ -478,23 +1005,23 @@ class TelegramAdapter {
         this.inflightUpdates.delete(id);
       }
     };
-    if (command && IMMEDIATE_COMMANDS.has(command.name)) {
-      void run();
+    if (listsProjects || (command && IMMEDIATE_COMMANDS.has(command.name))) {
+      void run(() => this.handle(message, { ordinal }));
       return;
     }
-    const key = this.routeKey(message);
+    const key = routeKey;
     const previous = this.chains.get(key) || Promise.resolve();
-    let operation = () => this.handle(message);
+    let operation = () => this.handle(message, { ordinal });
     if (command && BARRIER_COMMANDS.has(command.name)) {
-      const encoded = encodeURIComponent(this.sessionKey(message));
-      const preempt = this.runtime("POST", `/v1/sessions/${encoded}/interrupt`, {}).then(() => null, (err) => (
-        err.statusCode === 404 ? null : err
-      ));
-      const route = this.routes[key] || { driver: this.config.telegram.defaultDriver };
-      operation = () => preempt.then((error) => {
-        if (error) throw error;
-        return this.control(message, route, command, { preempted: true });
-      });
+      const preparation = this.prepareBarrier(message, command, ordinal);
+      operation = async () => {
+        const prepared = await preparation;
+        try {
+          return await this.handle(message, { preparation: prepared, ordinal });
+        } finally {
+          this.removePendingBarrier(key, prepared.pendingBarrier);
+        }
+      };
     }
     const next = previous.then(() => run(operation));
     const tracked = next.finally(() => {
@@ -507,17 +1034,20 @@ class TelegramAdapter {
     this.dispatch({ message });
   }
 
-  acceptedMessage(update) {
+  async acceptedMessage(update) {
     const message = update?.message;
     if (!message || (!message.text && !message.caption && !this.telegramFile(message))) return false;
-    return this.config.telegram.allowedChatIds.has("*")
+    if (this.ownerStore.get()) return this.ownerStore.authorize(message);
+    const admittedChat = this.config.telegram.allowedChatIds.has("*")
       || this.config.telegram.allowedChatIds.has(String(message.chat.id));
+    if (!admittedChat) return false;
+    return this.ownerStore.authorize(message);
   }
 
   async acceptUpdate(update) {
     const nextOffset = Math.max(this.offset, Number(update.update_id) + 1);
     let queuePath = null;
-    if (this.acceptedMessage(update)) {
+    if (await this.acceptedMessage(update)) {
       queuePath = path.join(this.queueDir, `${Number(update.update_id)}.json`);
       const existing = await readJson(queuePath, null);
       if (!existing) await writeAtomic(queuePath, update);
@@ -545,4 +1075,12 @@ class TelegramAdapter {
   }
 }
 
-module.exports = { CONTROL_COMMANDS, TELEGRAM_DOCUMENT_LIMIT, TelegramAdapter, chunks, commandFor };
+module.exports = {
+  BARRIER_COMMANDS,
+  CONTROL_COMMANDS,
+  TELEGRAM_DOCUMENT_LIMIT,
+  TelegramAdapter,
+  chunks,
+  commandFor,
+  topicThreadId,
+};

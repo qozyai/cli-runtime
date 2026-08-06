@@ -31,6 +31,20 @@ class Tmux {
     return (await this.run(["has-session", "-t", sessionName], { allowFailure: true })) !== null;
   }
 
+  async listSessions(prefix = "") {
+    const output = await this.run(["list-sessions", "-F", "#{session_name}"], { allowFailure: true });
+    if (output === null) return [];
+    return output.split(/\r?\n/).map((name) => name.trim()).filter((name) => name && name.startsWith(prefix));
+  }
+
+  async hasAttachedClients(sessionName) {
+    if (!await this.has(sessionName)) return false;
+    const output = await this.run([
+      "list-clients", "-t", sessionName, "-F", "#{client_name}",
+    ], { allowFailure: true });
+    return Boolean(String(output || "").trim());
+  }
+
   async createShell(sessionName, workspace) {
     if (await this.has(sessionName)) throw new Error(`tmux session already exists: ${sessionName}`);
     await this.run([

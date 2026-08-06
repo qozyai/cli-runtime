@@ -1,5 +1,6 @@
 "use strict";
 
+const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
@@ -17,7 +18,40 @@ function positiveNumber(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function loadConfig(env = process.env) {
+function configError(message) {
+  const error = new Error(message);
+  error.code = "EX_CONFIG";
+  error.exitCode = 78;
+  return error;
+}
+
+function telegramProjectsRoot(env, { required = false } = {}) {
+  const key = "CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT";
+  const present = Object.prototype.hasOwnProperty.call(env, key);
+  if (!present) {
+    if (required) throw configError(`${key} is required when the Telegram adapter is enabled`);
+    return null;
+  }
+  const raw = String(env[key] ?? "").trim();
+  if (!raw) throw configError(`${key} must not be empty`);
+  const resolved = path.resolve(raw);
+  if (["$HOME", "~"].includes(raw) || resolved === path.resolve(os.homedir())) {
+    throw configError(`${key} must not be the runtime user's home directory`);
+  }
+  if (resolved === path.parse(resolved).root) throw configError(`${key} must not be the filesystem root`);
+  let canonical;
+  try {
+    canonical = fs.realpathSync(resolved);
+    if (!fs.statSync(canonical).isDirectory()) throw new Error("not a directory");
+  } catch (cause) {
+    const error = configError(`${key} must name an existing directory`);
+    error.cause = cause;
+    throw error;
+  }
+  return canonical;
+}
+
+function loadConfig(env = process.env, { requireTelegramProjectsRoot = false } = {}) {
   const stateDir = path.resolve(env.CLI_RUNTIME_STATE_DIR || path.join(os.homedir(), ".local", "state", "qozyai-cli-runtime"));
   return {
     stateDir,
@@ -60,7 +94,7 @@ function loadConfig(env = process.env) {
     telegram: {
       token: String(env.TELEGRAM_BOT_TOKEN || "").trim(),
       defaultDriver: String(env.CLI_RUNTIME_TELEGRAM_DRIVER || "claude").trim().toLowerCase(),
-      workspace: path.resolve(env.CLI_RUNTIME_TELEGRAM_WORKSPACE || process.cwd()),
+      projectsRoot: telegramProjectsRoot(env, { required: requireTelegramProjectsRoot }),
       statusEditIntervalMs: positiveNumber(env.CLI_RUNTIME_TELEGRAM_STATUS_EDIT_MS, 5000),
       maxFileBytes: positiveNumber(env.CLI_RUNTIME_TELEGRAM_MAX_FILE_BYTES, 20 * 1024 * 1024),
       requestTimeoutMs: positiveNumber(env.CLI_RUNTIME_TELEGRAM_REQUEST_TIMEOUT_MS, 30_000),
@@ -72,4 +106,4 @@ function loadConfig(env = process.env) {
   };
 }
 
-module.exports = { loadConfig };
+module.exports = { configError, loadConfig, telegramProjectsRoot };

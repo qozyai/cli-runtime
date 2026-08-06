@@ -75,7 +75,6 @@ function selectRecentTurns(turns) {
 }
 
 async function writeTextAtomic(filePath, text) {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
   const tmp = `${filePath}.${process.pid}.${Date.now()}.${crypto.randomBytes(4).toString("hex")}.tmp`;
   await fs.writeFile(tmp, text, { encoding: "utf8", mode: 0o600 });
   await fs.rename(tmp, filePath);
@@ -138,7 +137,7 @@ class WorkspaceState {
     this.maxOutputFileBytes = Number(config?.workspaceMaxOutputFileBytes) || 100 * 1024 * 1024;
     this.maxOutputTotalBytes = Number(config?.workspaceMaxOutputTotalBytes) || 200 * 1024 * 1024;
     this.workspaceLocks = new Map();
-    this.pruneScheduled = new Set();
+    this.pruneScheduled = new Map();
     this.initializedWorkspaces = new Set();
   }
 
@@ -157,12 +156,32 @@ class WorkspaceState {
 
   schedulePrune(workspace) {
     const key = path.resolve(workspace);
-    if (this.pruneScheduled.has(key)) return;
-    this.pruneScheduled.add(key);
-    setImmediate(() => this.prune(key).catch((err) => this.eventStore?.append("workspace.prune_failed", {
-      workspace: key,
-      error: tailText(err.message || String(err), 4000),
-    }).catch(() => {})).finally(() => this.pruneScheduled.delete(key)));
+    const existing = this.pruneScheduled.get(key);
+    if (existing) return existing;
+    let resolveJob;
+    const job = new Promise((resolve) => { resolveJob = resolve; });
+    this.pruneScheduled.set(key, job);
+    const timer = setTimeout(async () => {
+      try {
+        await this.prune(key);
+      } catch (err) {
+        await this.eventStore?.append("workspace.prune_failed", {
+          workspace: key,
+          error: tailText(err.message || String(err), 4000),
+        }).catch(() => {});
+      } finally {
+        if (this.pruneScheduled.get(key) === job) this.pruneScheduled.delete(key);
+        resolveJob();
+      }
+    }, 25);
+    timer.unref();
+    return job;
+  }
+
+  async waitForPrunes() {
+    while (this.pruneScheduled.size > 0) {
+      await Promise.all([...this.pruneScheduled.values()]);
+    }
   }
 
   paths(workspace) {
@@ -210,13 +229,22 @@ class WorkspaceState {
   async ensure(workspace) {
     const key = path.resolve(workspace);
     const paths = this.paths(workspace);
+    const workspaceStat = await fs.lstat(key).catch((err) => {
+      if (err?.code === "ENOENT") return null;
+      throw err;
+    });
+    if (!workspaceStat?.isDirectory() || workspaceStat.isSymbolicLink()) {
+      const error = new Error(`workspace is missing or is not a direct directory: ${key}`);
+      error.code = "WORKSPACE_MISSING";
+      throw error;
+    }
     for (const dir of [
       paths.root, paths.history, paths.active, paths.io, paths.inbox, paths.outbox,
       path.dirname(paths.historyInbox), paths.historyInbox, paths.historyOutbox,
     ]) {
       const stat = await fs.lstat(dir).catch(() => null);
       if (stat && (!stat.isDirectory() || stat.isSymbolicLink())) throw new Error(`workspace state path is not a direct directory: ${dir}`);
-      if (!stat) await fs.mkdir(dir, { mode: 0o700, recursive: true });
+      if (!stat) await fs.mkdir(dir, { mode: 0o700 });
     }
     if (!this.initializedWorkspaces.has(key)) {
       await this.ensureGitExclude(workspace, paths.root);
@@ -247,7 +275,9 @@ class WorkspaceState {
     const relative = `${path.relative(worktree, privateRoot).replaceAll(path.sep, "/")}/`;
     const existing = await fs.readFile(excludePath, "utf8").catch(() => "");
     if (existing.split(/\r?\n/).includes(relative)) return;
-    await fs.mkdir(path.dirname(excludePath), { recursive: true });
+    await fs.mkdir(path.dirname(excludePath), { mode: 0o700 }).catch((err) => {
+      if (err?.code !== "EEXIST") throw err;
+    });
     await fs.appendFile(excludePath, `${existing && !existing.endsWith("\n") ? "\n" : ""}${relative}\n`, { mode: 0o600 });
   }
 
@@ -562,7 +592,12 @@ class WorkspaceState {
 
   async prune(workspace) {
     return this.withWorkspaceLock(workspace, async () => {
-      const paths = await this.ensure(workspace);
+      const paths = this.paths(workspace);
+      const rootStat = await fs.lstat(paths.root).catch((err) => {
+        if (err?.code === "ENOENT") return null;
+        throw err;
+      });
+      if (!rootStat?.isDirectory() || rootStat.isSymbolicLink()) return;
       const entries = await fs.readdir(paths.history, { withFileTypes: true }).catch(() => []);
       const ioEvents = await readJsonlLossless(paths.ioEvents);
       const pendingOutputs = new Map();
