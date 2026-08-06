@@ -11,6 +11,7 @@ const path = require("node:path");
 const { Tmux } = require("../src/tmux");
 const { SessionManager } = require("../src/session-manager");
 const { TelegramAdapter } = require("../src/telegram");
+const { EventStore } = require("../src/event-store");
 const { installRejectionBackstop } = require("../src/main");
 
 async function waitFor(fn, timeoutMs = 15_000) {
@@ -156,15 +157,84 @@ test("the adapter starts even when the notice spool cannot be created", async (t
     fetchImpl: async () => { throw new Error("no network in this test"); },
     log: (line) => logged.push(line),
   });
+  let drained = 0;
   adapter.notices = {
     init: async () => { throw new Error("mkdir denied"); },
-    drain: async () => { throw new Error("mkdir denied"); },
+    drain: async () => { drained += 1; return []; },
   };
   adapter.runMarker = { start: async () => { throw new Error("marker unavailable"); }, markCleanStop: async () => {} };
 
   await adapter.init();
-  assert.ok(logged.some((line) => /restart announcements unavailable/.test(line)));
+  assert.ok(logged.some((line) => /notice spool unavailable/.test(line)));
+  // Each startup courtesy degrades on its own: a failed spool or announcement must
+  // not skip the ones after it.
+  assert.equal(drained, 1, "notice delivery still ran after the spool failed");
   assert.equal(adapter.offset, 0, "ingress state is still initialized");
+});
+
+test("appending never throws into its caller, even through a bad listener", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-append-throw-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const store = new EventStore(root);
+  await store.init();
+
+  store.events.on("event", () => { throw new Error("listener exploded"); });
+  // note() attaches .catch() after the call returns, so a synchronous throw would
+  // escape it entirely and fail whatever the runtime was doing.
+  assert.doesNotThrow(() => store.append("t.listener", { sessionKey: "main" }));
+  await store.append("t.listener.again", { sessionKey: "main" });
+  assert.equal(store.read({ after: 0 }).length, 2, "both events are still recorded");
+
+  const circular = { sessionKey: "main" };
+  circular.self = circular;
+  await assert.rejects(() => store.append("t.circular", circular), /circular|convert/i);
+});
+
+test("a listener that appends re-entrantly cannot reorder or lose the file", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-append-reentrant-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const store = new EventStore(root, { maxBytes: 600, maxEvents: 4 });
+  await store.init();
+
+  let reentered = false;
+  store.events.on("event", (event) => {
+    if (reentered || event.type !== "t.outer") return;
+    reentered = true;
+    store.append("t.inner", { sessionKey: "main" }).catch(() => {});
+  });
+  for (let index = 0; index < 12; index += 1) await store.append("t.outer", { index, sessionKey: "main" });
+  await store.writeChain;
+
+  const lines = (await fs.readFile(path.join(root, "events.jsonl"), "utf8")).split("\n").filter(Boolean);
+  const sequences = lines.map((line) => JSON.parse(line).sequence);
+  assert.deepEqual(sequences, [...sequences].sort((a, b) => a - b), "the file stays ordered by sequence");
+  assert.equal(new Set(sequences).size, sequences.length, "no record is written twice");
+  assert.ok(reentered, "the re-entrant append actually ran");
+});
+
+test("the last net settles a submission even when the rejection carries no error", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-nullish-reject-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sessions = new SessionManager({
+    config: { stateDir: root },
+    tmux: {},
+    eventStore: brokenEventStore(),
+  });
+  await sessions.init();
+
+  const session = { sessionKey: "main", driver: "claude", workspace: root, status: "running", activeSubmissionId: "sub-1" };
+  const submission = { submissionId: "sub-1", sessionKey: "main", status: "running", workspace: root };
+  const activeRuntime = { submission, interrupted: false };
+  sessions.sessions.set("main", session);
+  sessions.active.set("main", activeRuntime);
+
+  await sessions.failUnexpectedExecution(session, submission, activeRuntime, undefined);
+
+  assert.equal(submission.status, "failed");
+  assert.match(submission.error, /unexpected execution failure: undefined/);
+  assert.equal(session.status, "attention_required");
+  assert.equal(session.activeSubmissionId, null);
+  assert.equal(sessions.active.has("main"), false, "the session is released, not left busy forever");
 });
 
 test("the service installs a backstop so one stray rejection cannot end it", () => {

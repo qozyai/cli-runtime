@@ -684,14 +684,17 @@ class SessionManager {
   // The last net under an execution that threw. It has nothing behind it, so every
   // step here is total: in-memory state is settled first, and no write may throw.
   async failUnexpectedExecution(session, submission, activeRuntime, error) {
+    // A rejection can carry any value, including undefined. Normalize before reading
+    // it: throwing here would leave the submission active and the session busy forever.
+    const reason = error instanceof Error ? error : new Error(`unexpected execution failure: ${String(error)}`);
     if (this.active.get(session.sessionKey) !== activeRuntime) return;
     const status = activeRuntime.interrupted ? "interrupted" : "failed";
-    const failure = tailText(error.message || String(error), 20_000);
+    const failure = tailText(reason.message || String(reason), 20_000);
     this.active.delete(session.sessionKey);
     session.activeSubmissionId = null;
     session.lastSubmissionId = submission.submissionId;
     session.status = status === "interrupted" ? "ready"
-      : error.code === "AUTH_REQUIRED" ? "auth_required" : "attention_required";
+      : reason.code === "AUTH_REQUIRED" ? "auth_required" : "attention_required";
     session.lastError = status === "interrupted" ? null : failure;
     submission.status = status;
     submission.error = failure;

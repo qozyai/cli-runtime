@@ -188,12 +188,18 @@ class TelegramAdapter {
     // Announce before the backlog is replayed, so the restart precedes the answers
     // to messages that arrived while the runtime was down. None of it may stop the
     // adapter from starting: announcements are a courtesy, ingress is the job.
-    try {
-      await this.notices.init();
-      await this.announceRestart();
-      await this.flushNotices();
-    } catch (err) {
-      this.log(`[telegram] restart announcements unavailable: ${err.message}`);
+    // Each step degrades on its own: a failed announcement must not skip the spool,
+    // and neither may stop ingress.
+    for (const [label, step] of [
+      ["notice spool", () => this.notices.init()],
+      ["restart announcement", () => this.announceRestart()],
+      ["notice delivery", () => this.flushNotices()],
+    ]) {
+      try {
+        await step();
+      } catch (err) {
+        this.log(`[telegram] ${label} unavailable: ${err.message}`);
+      }
     }
     this.offset = Number((await readJson(this.offsetPath, {})).offset || 0);
     const queued = (await fs.readdir(this.queueDir).catch(() => []))

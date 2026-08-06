@@ -89,14 +89,22 @@ class EventStore {
 
   // Readers serve from memory, so an event is visible the moment it happens. The
   // durable write is queued behind it: a caller that does not await this promise
-  // cannot be failed by an unwritable event log.
+  // cannot be failed by an unwritable event log. This never throws synchronously —
+  // a caller's .catch() is not attached yet when the body runs.
   append(type, details = {}) {
+    try {
+      return this.publish(type, details);
+    } catch (err) {
+      return Promise.reject(err);
+    }
+  }
+
+  publish(type, details) {
     const written = { version: 1, sequence: ++this.sequence, at: nowIso(), type, ...details };
     const line = `${JSON.stringify(written)}\n`;
     const bytes = Buffer.byteLength(line);
     this.records.push({ event: written, bytes });
     this.trim();
-    this.events.emit("event", written);
     const durableWrite = this.writeChain.catch(() => {}).then(async () => {
       await fs.appendFile(this.filePath, line, { encoding: "utf8", mode: 0o600 });
       this.durableSequence = written.sequence;
@@ -105,6 +113,14 @@ class EventStore {
       if (this.fileBytes > this.maxBytes * 2 || this.fileEvents > this.maxEvents * 2) await this.compact();
     });
     this.writeChain = durableWrite.catch(() => {});
+    // Emit only after this event owns its position in the chain. A listener that
+    // appends re-entrantly would otherwise queue its write first, sending the file
+    // out of order and letting durableSequence regress into a lossy compaction.
+    try {
+      this.events.emit("event", written);
+    } catch (err) {
+      process.stderr.write(`[cli-runtime] event listener failed (${type}): ${err.message}\n`);
+    }
     return durableWrite.then(() => written);
   }
 
