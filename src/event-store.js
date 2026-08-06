@@ -7,6 +7,9 @@ const { nowIso } = require("./util");
 
 const MAX_EVENT_BYTES = 16 * 1024 * 1024;
 const MAX_EVENTS = 10_000;
+// A filesystem that hangs rather than fails would otherwise queue writes forever,
+// because nothing on the turn path awaits them any more.
+const MAX_PENDING_WRITES = 1000;
 
 async function readTail(filePath, maxBytes) {
   let handle;
@@ -31,7 +34,10 @@ async function readTail(filePath, maxBytes) {
 }
 
 class EventStore {
-  constructor(stateDir, { maxBytes = MAX_EVENT_BYTES, maxEvents = MAX_EVENTS } = {}) {
+  constructor(stateDir, { maxBytes = MAX_EVENT_BYTES, maxEvents = MAX_EVENTS, maxPendingWrites = MAX_PENDING_WRITES } = {}) {
+    this.maxPendingWrites = maxPendingWrites;
+    this.pendingWrites = 0;
+    this.droppedWrites = 0;
     this.filePath = path.join(stateDir, "events.jsonl");
     this.sequence = 0;
     this.events = new EventEmitter();
@@ -105,23 +111,55 @@ class EventStore {
     const bytes = Buffer.byteLength(line);
     this.records.push({ event: written, bytes });
     this.trim();
+
+    // A stuck disk shows up as a growing backlog, not as an error. Shed the durable
+    // write instead of holding every pending line in memory; the event stays
+    // readable, and what never reached disk is counted and reported.
+    if (this.pendingWrites >= this.maxPendingWrites) {
+      if (this.droppedWrites === 0) {
+        process.stderr.write(`[cli-runtime] event log backlog full (${this.pendingWrites} pending); shedding durable writes\n`);
+      }
+      this.droppedWrites += 1;
+      this.emitEvent(written, type);
+      return Promise.resolve(written);
+    }
+
+    this.pendingWrites += 1;
     const durableWrite = this.writeChain.catch(() => {}).then(async () => {
-      await fs.appendFile(this.filePath, line, { encoding: "utf8", mode: 0o600 });
-      this.durableSequence = written.sequence;
-      this.fileBytes += bytes;
-      this.fileEvents += 1;
-      if (this.fileBytes > this.maxBytes * 2 || this.fileEvents > this.maxEvents * 2) await this.compact();
+      try {
+        await fs.appendFile(this.filePath, line, { encoding: "utf8", mode: 0o600 });
+        this.durableSequence = written.sequence;
+        this.fileBytes += bytes;
+        this.fileEvents += 1;
+        if (this.fileBytes > this.maxBytes * 2 || this.fileEvents > this.maxEvents * 2) await this.compact();
+      } finally {
+        this.pendingWrites -= 1;
+        if (this.pendingWrites === 0 && this.droppedWrites > 0) this.reportDroppedWrites();
+      }
     });
     this.writeChain = durableWrite.catch(() => {});
     // Emit only after this event owns its position in the chain. A listener that
     // appends re-entrantly would otherwise queue its write first, sending the file
     // out of order and letting durableSequence regress into a lossy compaction.
+    this.emitEvent(written, type);
+    return durableWrite.then(() => written);
+  }
+
+  emitEvent(written, type) {
     try {
       this.events.emit("event", written);
     } catch (err) {
       process.stderr.write(`[cli-runtime] event listener failed (${type}): ${err.message}\n`);
     }
-    return durableWrite.then(() => written);
+  }
+
+  // Runs once the backlog clears. Resetting first keeps this event from counting
+  // itself into a second report.
+  reportDroppedWrites() {
+    const dropped = this.droppedWrites;
+    this.droppedWrites = 0;
+    process.stderr.write(`[cli-runtime] event log backlog cleared; ${dropped} events were not persisted\n`);
+    this.publish("runtime.events_dropped", { dropped });
   }
 
   read({ after = 0, sessionKey = null, limit = 500 } = {}) {

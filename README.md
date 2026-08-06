@@ -22,6 +22,8 @@ policy. A caller represents each independent execution lane with a session key.
 - driver liveness and exit status come from tmux pane lifecycle, not pane text or pane-writable metadata
 - every submission owns exact inbox and outbox directories
 - event replay uses a bounded durable window with explicit cursor expiry
+- events are readable the moment they happen; their disk write follows, so a hard
+  kill can lose recent events and a stuck disk sheds them with a reported count
 - normalized history and file exchange live under `<workspace>/.qozyai`
 - a missing workspace is never recreated implicitly
 - observability, history, and enrichment failures never fail a turn; they warn

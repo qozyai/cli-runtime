@@ -60,11 +60,27 @@ violated it:
 ## Design
 
 **Events are published, not awaited.** `EventStore.append` now assigns the
-sequence, pushes the record, and emits it synchronously, then queues the durable
-write behind the existing chain. Readers serve from memory, so an event is
-visible to `/v1/events` the moment it happens, while a caller that does not await
-the returned promise cannot be failed by an unwritable log. Compaction rewrites
-only records already on disk, so a queued append is never written twice.
+sequence, pushes the record, and emits it, then queues the durable write behind
+the existing chain. Readers serve from memory, so an event is visible to
+`/v1/events` the moment it happens, while a caller that does not await the
+returned promise cannot be failed by an unwritable log. Compaction rewrites only
+records already on disk, so a queued append is never written twice. `append`
+never throws synchronously — a caller's `.catch()` is not attached until it
+returns — and the emit happens only after the event owns its position in the
+write chain, so a listener that appends re-entrantly cannot reorder the file or
+make `durableSequence` regress.
+
+**Durability now lags visibility, and that is the trade.** An event is readable
+immediately but reaches disk later, so a `SIGKILL` can lose recent events and a
+client can read an event through the API that never reached the file. This is
+acceptable for observability and would not be for anything core.
+
+**A stuck disk sheds rather than grows.** A filesystem that hangs instead of
+failing has no error to catch, and nothing on the turn path awaits these writes
+any more, so the backlog would grow unbounded. Beyond `maxPendingWrites` (1000)
+the durable write is dropped, the event stays readable, and the count of shed
+writes is reported on stderr and published as a `runtime.events_dropped` event
+once the backlog clears.
 
 **`note(type, details)`** replaces every awaited `eventStore.append` in the
 session and auth managers. It never throws, never blocks, and reports an append
@@ -119,6 +135,12 @@ Each line is one assertion, verified by fault injection rather than by reading.
   produced it, without waiting for the durable write
 - compaction never rewrites a record whose durable append has not run
 - an append failure is reported on stderr and nowhere else
+- `append` returns a rejected promise rather than throwing synchronously, and a
+  listener that throws neither escapes nor loses the event
+- a listener that appends re-entrantly leaves the file ordered by sequence with
+  no record written twice
+- a filesystem that hangs leaves pending writes bounded, events readable, and
+  the shed count reported as `runtime.events_dropped` when the backlog clears
 
 **History**
 

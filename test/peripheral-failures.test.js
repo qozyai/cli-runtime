@@ -212,6 +212,36 @@ test("a listener that appends re-entrantly cannot reorder or lose the file", asy
   assert.ok(reentered, "the re-entrant append actually ran");
 });
 
+test("a hung filesystem sheds durable writes instead of growing without bound", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-write-shed-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const store = new EventStore(root, { maxPendingWrites: 20 });
+  await store.init();
+
+  // A disk that accepts writes and never completes them: the failure mode that has
+  // no error to catch.
+  const realAppendFile = fs.appendFile;
+  let held = [];
+  fs.appendFile = (...args) => new Promise((resolve) => { held.push(() => resolve(realAppendFile(...args))); });
+  t.after(() => { fs.appendFile = realAppendFile; });
+
+  for (let index = 0; index < 500; index += 1) store.append("t.flood", { index, sessionKey: "main" });
+  assert.ok(store.pendingWrites <= 20, `pending writes stayed bounded, saw ${store.pendingWrites}`);
+  assert.ok(store.droppedWrites > 400, `most writes were shed, saw ${store.droppedWrites}`);
+  assert.equal(store.read({ after: store.sequence - 3 }).length, 3, "events remain readable while the disk is stuck");
+
+  // The disk recovers: the backlog drains and the loss is recorded as an event.
+  fs.appendFile = realAppendFile;
+  for (const release of held) release();
+  held = [];
+  await store.writeChain;
+  await new Promise((resolve) => setImmediate(resolve));
+  const reported = store.read({ after: 0, limit: 5000 }).filter((event) => event.type === "runtime.events_dropped");
+  assert.equal(reported.length, 1);
+  assert.ok(reported[0].dropped > 400);
+  assert.equal(store.droppedWrites, 0, "the counter resets once reported");
+});
+
 test("the last net settles a submission even when the rejection carries no error", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-nullish-reject-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
