@@ -502,6 +502,62 @@ test("Telegram does not redeliver outputs that were already acknowledged", async
   assert.equal(runtimeCalls.some((call) => call.requestPath.includes("/outputs/ack")), false);
 });
 
+test("Telegram restarts an auth-required session after provider login", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-auth-recovery-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const adapter = new TelegramAdapter({
+    config: {
+      stateDir: root,
+      socketPath: path.join(root, "runtime.sock"),
+      telegram: {
+        token: "token",
+        defaultDriver: "codex",
+        projectsRoot: root,
+        allowedChatIds: new Set(),
+      },
+    },
+    fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true, result: { message_id: 1 } }) }),
+  });
+  await adapter.init();
+  await bindRoute(adapter, root, "42:main");
+  await adapter.routeStore.update("42:main", { driver: "codex", project: "project" });
+
+  const runtimeCalls = [];
+  adapter.ensureSession = async () => ({ status: "auth_required" });
+  adapter.runtime = async (method, requestPath) => {
+    runtimeCalls.push({ method, requestPath });
+    if (method === "GET" && requestPath === "/v1/auth/codex/status") {
+      return { auth: { authenticated: true } };
+    }
+    if (method === "POST" && requestPath.endsWith("/restart")) {
+      return { session: { status: "ready" } };
+    }
+    if (method === "POST" && requestPath.endsWith("/submissions")) {
+      return { submission: { submissionId: "sub-after-auth" } };
+    }
+    throw new Error(`unexpected runtime call: ${method} ${requestPath}`);
+  };
+  adapter.waitSubmission = async () => ({
+    submissionId: "sub-after-auth",
+    status: "completed",
+    reply: "Codex turn completed",
+    outputs: [],
+  });
+  adapter.sendStatus = async () => ({ message_id: 10 });
+  adapter.typing = async () => {};
+  adapter.send = async () => {};
+  adapter.finalizeStatus = async () => {};
+
+  await adapter.handle({ chat: { id: 42 }, message_id: 9, text: "continue after login" });
+
+  const encodedSession = encodeURIComponent(`telegram:42:main:${path.join(root, "project")}`);
+  assert.deepEqual(runtimeCalls.map(({ method, requestPath }) => `${method} ${requestPath}`), [
+    "GET /v1/auth/codex/status",
+    `POST /v1/sessions/${encodedSession}/restart`,
+    `POST /v1/sessions/${encodedSession}/submissions`,
+  ]);
+});
+
 test("Telegram persists accepted updates before advancing offset and replays queued work", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-queue-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

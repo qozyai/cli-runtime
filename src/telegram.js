@@ -925,8 +925,17 @@ class TelegramAdapter {
       let session = await this.ensureSession(message, route.driver, project);
       this.checkOperation(operation);
       if (session.status === "auth_required") {
-        await this.send(message, await this.authMessage(route.driver));
-        return;
+        const status = await this.runtime("GET", `/v1/auth/${route.driver}/status`);
+        this.checkOperation(operation);
+        if (status.auth.authenticated) {
+          const restarted = await this.runtime("POST", `/v1/sessions/${encodeURIComponent(operation.sessionKey)}/restart`, {});
+          this.checkOperation(operation);
+          session = restarted.session;
+        }
+        if (session.status === "auth_required") {
+          await this.send(message, await this.authMessage(route.driver));
+          return;
+        }
       }
       if (["stopped", "attention_required", "failed"].includes(session.status)) {
         const restarted = await this.runtime("POST", `/v1/sessions/${encodeURIComponent(operation.sessionKey)}/restart`, {});
