@@ -36,20 +36,6 @@ function lastMatchingLineIndex(lines, pattern) {
   return result;
 }
 
-// What is left in the composer after the prompt glyph. An interrupted paste leaves
-// its partial text here, and pasting on top of it fuses two prompts into one.
-function composerResidue(driver, cursorLine, cursorColumn = null) {
-  // Both current provider TUIs can draw dim placeholder suggestions after an
-  // otherwise empty prompt. Tmux captures that paint as text, but the cursor
-  // remains immediately after the glyph and space. Real editable input moves it.
-  if (Number.isInteger(cursorColumn) && cursorColumn <= 2) return "";
-  const line = String(cursorLine || "").replace(/\r/g, "").split("\n").find((part) => part.trim()) || "";
-  const glyph = normalizeDriver(driver) === "claude" ? "❯" : "›";
-  const trimmed = line.trimStart();
-  const text = trimmed.startsWith(glyph) ? trimmed.slice(glyph.length) : trimmed;
-  return text.replace(/[\s ]+/g, " ").trim();
-}
-
 function driverConfig(config, driver) {
   return config.drivers[normalizeDriver(driver)];
 }
@@ -166,7 +152,6 @@ module.exports = {
   artifactRoot,
   authCommand,
   buildLaunch,
-  composerResidue,
   driverConfig,
   driverExit,
   isAuthRequired,

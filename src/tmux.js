@@ -97,13 +97,6 @@ class Tmux {
     return this.run(["capture-pane", "-p", "-S", String(cursorY), "-E", String(cursorY), "-t", sessionName]);
   }
 
-  async cursorColumn(sessionName) {
-    const cursorX = Number((await this.run([
-      "display-message", "-p", "-t", sessionName, "#{cursor_x}",
-    ])).trim());
-    return Number.isInteger(cursorX) && cursorX >= 0 ? cursorX : null;
-  }
-
   async sendKey(sessionName, key) {
     await this.run(["send-keys", "-t", sessionName, key]);
   }
