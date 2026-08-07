@@ -16,14 +16,24 @@ function recentScreen(screen, lines = 60) {
   return parts.slice(-lines).join("\n");
 }
 
-function hasPromptCandidate(screen, glyph) {
-  return String(screen || "").split(/\r?\n/).some((line) => {
+function lastPromptCandidateIndex(lines, glyph) {
+  let result = -1;
+  lines.forEach((line, index) => {
     const trimmed = line.trimStart();
-    if (!trimmed.startsWith(glyph)) return false;
+    if (!trimmed.startsWith(glyph)) return;
     const remainder = trimmed.slice(glyph.length);
-    if (!/^[\s\u00a0]/.test(remainder)) return false;
-    return !/^\s*\d+(?:[.)])?(?:\s|$)/.test(remainder);
+    if (!/^[\s\u00a0]/.test(remainder)) return;
+    if (!/^\s*\d+(?:[.)])?(?:\s|$)/.test(remainder)) result = index;
   });
+  return result;
+}
+
+function lastMatchingLineIndex(lines, pattern) {
+  let result = -1;
+  lines.forEach((line, index) => {
+    if (pattern.test(line)) result = index;
+  });
+  return result;
 }
 
 // What is left in the composer after the prompt glyph. An interrupted paste leaves
@@ -77,12 +87,17 @@ function buildLaunch(config, session) {
 
 function isReady(driver, screen) {
   const recent = recentScreen(screen);
+  const lines = recent.split(/\r?\n/);
   if (driver === "claude") {
-    if (/WARNING: Claude Code running in Bypass Permissions mode|Try the new fullscreen renderer\?|Choose the text style|Security notes|Quick safety check|Select login method/i.test(recent)) return false;
-    return hasPromptCandidate(recent, "❯");
+    const prompt = lastPromptCandidateIndex(lines, "❯");
+    const blocker = lastMatchingLineIndex(lines,
+      /WARNING: Claude Code running in Bypass Permissions mode|Try the new fullscreen renderer\?|Choose the text style|Security notes|Quick safety check|Select login method/i);
+    return prompt >= 0 && prompt > blocker;
   }
-  if (/esc to interrupt|tab to queue message|still working|Do you trust the contents of this directory\?|update available/i.test(recent)) return false;
-  return hasPromptCandidate(recent, "›");
+  const prompt = lastPromptCandidateIndex(lines, "›");
+  const blocker = lastMatchingLineIndex(lines,
+    /esc to interrupt|tab to queue message|still working|Do you trust the contents of this directory\?|update available/i);
+  return prompt >= 0 && prompt > blocker;
 }
 
 function isCollapsedPasteReceipt(driver, cursorLine, expectedChars) {

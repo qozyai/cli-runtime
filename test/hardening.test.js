@@ -106,6 +106,18 @@ test("startup dialogs are not mistaken for an editable prompt", () => {
   assert.equal(isReady("claude", "Claude Code\n❯ "), true);
   assert.equal(isReady("codex", "Codex\n› "), true);
   assert.equal(isReady("codex", "Codex\n› Explain this codebase"), true);
+  assert.equal(isReady("codex", [
+    "Do you trust the contents of this directory?",
+    "› 1. Yes, continue",
+    "Update available!",
+    "OpenAI Codex",
+    "› ",
+  ].join("\n")), true);
+  assert.equal(isReady("codex", [
+    "OpenAI Codex",
+    "› ",
+    "still working",
+  ].join("\n")), false);
 });
 
 test("explicit CLI option separator preserves option-like message text", () => {

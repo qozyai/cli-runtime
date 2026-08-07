@@ -367,7 +367,11 @@ class SessionManager {
       if (/Do you trust the contents of this directory\?/i.test(recent)) action = "1";
       else if (/update available/i.test(recent) && /skip/i.test(recent)) action = "2";
     }
-    if (!action || action === previousAction) return null;
+    if (!action) return null;
+    // Keep the action latched while its dialog remains in the captured pane. The
+    // terminal retains scrollback after advancing, so clearing the latch on the
+    // next poll can submit the same menu digit into the driver's real composer.
+    if (action === previousAction) return action;
     if (/^[0-9]$/.test(action)) {
       await this.tmux.sendLiteral(session.tmuxSessionName, action);
       await this.tmux.sendKey(session.tmuxSessionName, "Enter");
