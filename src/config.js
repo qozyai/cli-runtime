@@ -32,6 +32,15 @@ function configError(message) {
   return error;
 }
 
+function telegramOwnerEnrollmentCodeHash(env) {
+  const key = "CLI_RUNTIME_TELEGRAM_OWNER_ENROLLMENT_CODE_HASH";
+  const value = String(env[key] || "").trim().toLowerCase();
+  if (value && !/^[a-f0-9]{64}$/.test(value)) {
+    throw configError(`${key} must be a lowercase SHA-256 hex digest`);
+  }
+  return value;
+}
+
 function telegramProjectsRoot(env, { required = false } = {}) {
   const key = "CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT";
   const present = Object.prototype.hasOwnProperty.call(env, key);
@@ -116,6 +125,7 @@ function loadConfig(env = process.env, { requireTelegramProjectsRoot = false } =
         .split(",")
         .map((item) => item.trim())
         .filter(Boolean)),
+      ownerEnrollmentCodeHash: telegramOwnerEnrollmentCodeHash(env),
     },
   };
 }

@@ -219,6 +219,14 @@ private chat ID. `*` allows the first private sender to claim a fresh state, so
 do not use it during enrollment. After enrollment, the durable owner ID replaces
 the chat allowlist as the admission boundary.
 
+Managed onboarding instead sets
+`CLI_RUNTIME_TELEGRAM_OWNER_ENROLLMENT_CODE_HASH` to a lowercase SHA-256 digest.
+While no owner exists, only a private `/start <code>` whose digest matches can
+bind its non-bot `from.id`; the chat allowlist cannot bypass that proof. The raw
+single-use code is never stored by the runtime. Once bound, the durable owner ID
+replaces both enrollment mechanisms and group/topic routes are derived from
+Telegram updates.
+
 Text, documents, photos, audio, voice, video, and video notes are accepted. Files are
 acknowledged individually after delivery; oversized or failed siblings are
 reported without stranding successful files.

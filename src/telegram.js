@@ -1,5 +1,6 @@
 "use strict";
 
+const { createHash, timingSafeEqual } = require("node:crypto");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { request } = require("./client");
@@ -134,6 +135,15 @@ function commandFor(message) {
   const text = messageBody(message);
   const match = text.match(/^\/([a-z]+)(?:@\S+)?(?:\s+(.+))?$/i);
   return match ? { name: match[1].toLowerCase(), argument: String(match[2] || "").trim() } : null;
+}
+
+function matchesOwnerEnrollmentCode(message, expectedHash) {
+  if (!/^[a-f0-9]{64}$/.test(String(expectedHash || ""))) return false;
+  const command = commandFor(message);
+  const code = command?.name === "start" ? command.argument : "";
+  if (!/^[A-Za-z0-9_-]{20,64}$/.test(code)) return false;
+  const actual = createHash("sha256").update(code, "utf8").digest();
+  return timingSafeEqual(actual, Buffer.from(expectedHash, "hex"));
 }
 
 function topicThreadId(message) {
@@ -1187,6 +1197,12 @@ class TelegramAdapter {
     const message = update?.message;
     if (!message || (!message.text && !message.caption && !this.telegramFile(message))) return false;
     if (this.ownerStore.get()) return this.ownerStore.authorize(message);
+    if (this.config.telegram.ownerEnrollmentCodeHash) {
+      if (!matchesOwnerEnrollmentCode(message, this.config.telegram.ownerEnrollmentCodeHash)) {
+        return false;
+      }
+      return this.ownerStore.authorize(message);
+    }
     const admittedChat = this.config.telegram.allowedChatIds.has("*")
       || this.config.telegram.allowedChatIds.has(String(message.chat.id));
     if (!admittedChat) return false;

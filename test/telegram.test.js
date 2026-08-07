@@ -803,6 +803,44 @@ test("Telegram allowlist bootstraps one durable owner who can use any group", as
   assert.deepEqual(await readJson(path.join(root, "telegram", "offset.json")), { version: 1, offset: 89 });
 });
 
+test("one-time Telegram link binds only its private sender as owner", async (t) => {
+  const crypto = require("node:crypto");
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-enrollment-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const code = "owner_pairing_0123456789abcdef";
+  const config = {
+    stateDir: root,
+    telegram: {
+      token: "token",
+      defaultDriver: "claude",
+      projectsRoot: root,
+      allowedChatIds: new Set(["*"]),
+      ownerEnrollmentCodeHash: crypto.createHash("sha256").update(code).digest("hex"),
+    },
+  };
+  const adapter = new TelegramAdapter({ config });
+  await adapter.init();
+  const message = {
+    chat: { id: 42, type: "private" },
+    from: { id: 42, is_bot: false },
+    message_id: 1,
+    text: `/start ${code}`,
+  };
+
+  assert.equal(await adapter.acceptedMessage({ message: { ...message, text: "hello" } }), false);
+  assert.equal(await adapter.acceptedMessage({ message: { ...message, text: "/start wrong_owner_pairing_012345" } }), false);
+  assert.equal(await adapter.acceptedMessage({
+    message: { ...message, chat: { id: -1001, type: "supergroup" } },
+  }), false);
+  assert.equal(await adapter.acceptedMessage({ message }), true);
+  assert.equal(await adapter.acceptedMessage({
+    message: { ...message, chat: { id: -1001, type: "supergroup" }, text: "group prompt" },
+  }), true);
+  assert.equal(await adapter.acceptedMessage({
+    message: { ...message, chat: { id: 43, type: "private" }, from: { id: 43 }, text: `/start ${code}` },
+  }), false);
+});
+
 test("Telegram chunks do not split Unicode surrogate pairs", () => {
   const parts = chunks(`abc${"✅".repeat(10)}`, 4);
   assert.equal(parts.join(""), `abc${"✅".repeat(10)}`);

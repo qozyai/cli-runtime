@@ -95,6 +95,14 @@ test("Telegram projects-root configuration is explicit and rejects dangerous roo
   assert.throws(() => loadConfig({ ...base, CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT: "" }), /must not be empty/);
   assert.throws(() => loadConfig({ ...base, CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT: "/" }), /filesystem root/);
   assert.throws(() => loadConfig({ ...base, CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT: "$HOME" }), /home directory/);
+  assert.throws(
+    () => loadConfig({
+      ...base,
+      CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT: root,
+      CLI_RUNTIME_TELEGRAM_OWNER_ENROLLMENT_CODE_HASH: "not-a-digest",
+    }),
+    /lowercase SHA-256/,
+  );
   const config = loadConfig({ ...base, CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT: root }, { requireTelegramProjectsRoot: true });
   assert.equal(config.telegram.projectsRoot, await fs.realpath(root));
   assert.equal(Object.hasOwn(config.telegram, "workspace"), false);
