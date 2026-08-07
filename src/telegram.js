@@ -13,8 +13,8 @@ const { NoticeSpool, RunMarker, releaseIdFromPath, restartAnnouncement } = requi
 
 const TELEGRAM_DOCUMENT_LIMIT = 50 * 1024 * 1024;
 const TERMINAL_SUBMISSION_STATES = new Set(["completed", "failed", "interrupted"]);
-const CONTROL_COMMANDS = new Set(["project", "status", "stop", "reset", "driver"]);
-const IMMEDIATE_COMMANDS = new Set(["status", "stop"]);
+const CONTROL_COMMANDS = new Set(["project", "status", "stop", "reset", "driver", "attach"]);
+const IMMEDIATE_COMMANDS = new Set(["status", "stop", "attach"]);
 const BARRIER_COMMANDS = new Set(["project", "reset", "driver"]);
 const TELEGRAM_REQUEST_TIMEOUT_MS = 30_000;
 const TELEGRAM_RICH_MESSAGE_LIMIT = 32_768;
@@ -284,6 +284,18 @@ class TelegramAdapter {
       ...this.topicFields(message),
       text,
       disable_web_page_preview: true,
+    });
+  }
+
+  async sendButtons(message, text, buttons) {
+    return this.api("sendMessage", {
+      chat_id: message.chat.id,
+      ...this.topicFields(message),
+      text,
+      disable_web_page_preview: true,
+      reply_markup: {
+        inline_keyboard: buttons.map((button) => [{ text: button.label, url: button.url }]),
+      },
     });
   }
 
@@ -778,6 +790,74 @@ class TelegramAdapter {
     await this.send(message, `${stopped.cancelled ? "Stop requested." : "Nothing is running."}${dropped}`);
   }
 
+  async controlAttach(message) {
+    const serviceUrl = String(this.config.telegram.attachServiceUrl || "").trim();
+    if (!serviceUrl) {
+      await this.send(message, "Terminal attachment is not configured for this agent.");
+      return;
+    }
+
+    const route = this.routeState(message);
+    let current = null;
+    if (route.project) {
+      const { sessionKey } = this.sessionIdentity(message, route.project);
+      const info = await this.runtime("GET", `/v1/sessions/${encodeURIComponent(sessionKey)}/attach`).catch((err) => {
+        if (err.statusCode === 404) return null;
+        throw err;
+      });
+      if (info?.command) {
+        current = {
+          label: `${route.driver === "claude" ? "Claude Code" : "Codex"} · ${route.project}`,
+          attachCommand: info.command,
+        };
+      }
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      this.config.telegram.attachServiceTimeoutMs || TELEGRAM_REQUEST_TIMEOUT_MS,
+    );
+    let result;
+    try {
+      const response = await this.fetch(serviceUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ current }),
+        signal: controller.signal,
+      });
+      result = await response.json();
+      if (!response.ok || result?.ok !== true) {
+        throw new Error(result?.error || `attachment service failed (${response.status})`);
+      }
+    } catch (err) {
+      this.log(`[telegram] terminal attachment unavailable: ${err.message}`);
+      await this.send(message, "Terminal attachment is temporarily unavailable. Try /attach again.");
+      return;
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    const terminals = (Array.isArray(result.terminals) ? result.terminals : []).flatMap((terminal) => {
+      const label = String(terminal?.label || "").trim();
+      const url = String(terminal?.url || "").trim();
+      if (!label || Array.from(label).length > 64) return [];
+      try {
+        const parsed = new URL(url);
+        if (!["http:", "https:"].includes(parsed.protocol)) return [];
+      } catch {
+        return [];
+      }
+      return [{ label, url }];
+    }).slice(0, 8);
+
+    if (terminals.length === 0) {
+      await this.send(message, "No attachable terminals are running for this conversation.");
+      return;
+    }
+    await this.sendButtons(message, "Choose a terminal:", terminals);
+  }
+
   async controlReset(message, preparation = {}) {
     const route = this.routeState(message);
     if (!route.project) {
@@ -863,6 +943,7 @@ class TelegramAdapter {
     if (command.name === "stop") return this.controlStop(message, droppedBurst);
     if (command.name === "reset") return this.controlReset(message, preparation);
     if (command.name === "driver") return this.controlDriver(message, command, preparation);
+    if (command.name === "attach") return this.controlAttach(message);
     return undefined;
   }
 

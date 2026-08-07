@@ -74,14 +74,22 @@ errors, transcripts, and output files use the same normalized topic identity.
 | `/project <name>` | Bind or switch this route to the exact project name. |
 | `/start` | Check authentication and binding readiness without starting a session. |
 | `/status` | Show route, project availability, driver, session status, workspace, and active submission. |
+| `/attach` | Ask the configured external attachment service for global and current-route terminal links. CLI runtime never exposes tmux to the internet itself. |
 | `/stop` | Cancel adapter preparation or interrupt the exact accepted turn. The pane stays resident. |
 | `/reset` | Permanently close this route-project conversation. The next ordinary message starts fresh. |
 | `/driver claude\|codex` | Change the driver, close an incompatible conversation, and start nothing until the next ordinary message. Provider chat context is not transferred across the change. |
 
 Unknown and invalid project names change nothing. Selecting the current project
 or driver is an idempotent no-op and does not interrupt work. Bare `/project`,
-`/status`, and `/stop` are immediate; project selection, reset, and driver
+`/status`, `/attach`, and `/stop` are immediate; project selection, reset, and driver
 changes are ordered barriers before later messages.
+
+`/attach` is optional. Set `CLI_RUNTIME_TELEGRAM_ATTACH_SERVICE_URL` to a local
+HTTP endpoint supplied by the hosting environment. The adapter sends that
+service only the current route's existing attach command; discovery of global
+consoles, `ttyd`, tunneling, authentication, and exposure lifecycle stay outside
+CLI runtime. Without the setting, `/attach` reports that attachment is not
+configured.
 
 ## Switching and residency
 

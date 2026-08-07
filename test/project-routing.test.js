@@ -161,6 +161,7 @@ test("an unbound route neither creates a session nor downloads its attachment", 
 test("project is the only project-selection command", () => {
   assert.equal(CONTROL_COMMANDS.has("project"), true);
   assert.equal(CONTROL_COMMANDS.has("projects"), false);
+  assert.equal(CONTROL_COMMANDS.has("attach"), true);
 });
 
 test("rapid project barriers cancel the message between them and preserve final queue order", async (t) => {

@@ -897,6 +897,96 @@ test("one-time Telegram link binds only its private sender as owner", async (t) 
   }), false);
 });
 
+test("Telegram /attach exposes only global and current-route terminals through the external service", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-attach-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, "main"));
+  const calls = [];
+  const serviceUrl = "http://127.0.0.1:17871/v1/terminals";
+  const adapter = new TelegramAdapter({
+    config: {
+      stateDir: path.join(root, "state"),
+      socketPath: path.join(root, "runtime.sock"),
+      telegram: {
+        token: "token",
+        defaultDriver: "codex",
+        projectsRoot: root,
+        allowedChatIds: new Set(),
+        attachServiceUrl: serviceUrl,
+      },
+    },
+    fetchImpl: async (url, options) => {
+      const body = JSON.parse(options.body);
+      calls.push({ url, body });
+      if (url === serviceUrl) {
+        return {
+          ok: true,
+          json: async () => ({
+            ok: true,
+            terminals: [
+              { label: "Codex · main", url: "https://session.trycloudflare.com" },
+              { label: "Codex authentication", url: "https://auth.trycloudflare.com" },
+              { label: "discarded", url: "javascript:alert(1)" },
+            ],
+          }),
+        };
+      }
+      return { ok: true, json: async () => ({ ok: true, result: { message_id: 9 } }) };
+    },
+  });
+  await adapter.init();
+  await adapter.routeStore.update("42:7", { driver: "codex", project: "main" });
+  const expectedSessionKey = `telegram:42:7:${path.join(root, "main")}`;
+  adapter.runtime = async (method, requestPath) => {
+    assert.equal(method, "GET");
+    assert.equal(requestPath, `/v1/sessions/${encodeURIComponent(expectedSessionKey)}/attach`);
+    return { command: "tmux -L 'qozyai-cli-runtime' attach-session -t 'cli-current'" };
+  };
+
+  await adapter.handle({
+    chat: { id: 42 },
+    message_id: 1,
+    is_topic_message: true,
+    message_thread_id: 7,
+    text: "/attach",
+  });
+
+  assert.deepEqual(calls[0], {
+    url: serviceUrl,
+    body: {
+      current: {
+        label: "Codex · main",
+        attachCommand: "tmux -L 'qozyai-cli-runtime' attach-session -t 'cli-current'",
+      },
+    },
+  });
+  assert.equal(calls[1].url.endsWith("/sendMessage"), true);
+  assert.equal(calls[1].body.message_thread_id, 7);
+  assert.deepEqual(calls[1].body.reply_markup.inline_keyboard, [
+    [{ text: "Codex · main", url: "https://session.trycloudflare.com" }],
+    [{ text: "Codex authentication", url: "https://auth.trycloudflare.com" }],
+  ]);
+});
+
+test("Telegram /attach degrades cleanly when external attachment is not configured", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-no-attach-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sent = [];
+  const adapter = new TelegramAdapter({
+    config: {
+      stateDir: root,
+      telegram: { token: "token", defaultDriver: "claude", projectsRoot: root, allowedChatIds: new Set() },
+    },
+  });
+  await adapter.init();
+  adapter.send = async (_message, text) => { sent.push(text); };
+  adapter.runtime = async () => { throw new Error("runtime must not be queried"); };
+
+  await adapter.handle({ chat: { id: 42 }, message_id: 1, text: "/attach" });
+
+  assert.deepEqual(sent, ["Terminal attachment is not configured for this agent."]);
+});
+
 test("Telegram chunks do not split Unicode surrogate pairs", () => {
   const parts = chunks(`abc${"✅".repeat(10)}`, 4);
   assert.equal(parts.join(""), `abc${"✅".repeat(10)}`);

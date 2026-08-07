@@ -176,6 +176,8 @@ export TELEGRAM_BOT_TOKEN="..."
 export CLI_RUNTIME_TELEGRAM_DRIVER=claude
 export CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT="$HOME/projects"
 export CLI_RUNTIME_TELEGRAM_ALLOWED_CHATS="12345,67890"
+# Optional local Agent Environment service used only by /attach:
+export CLI_RUNTIME_TELEGRAM_ATTACH_SERVICE_URL="http://127.0.0.1:17871/v1/terminals"
 cli-runtime telegram
 ```
 
