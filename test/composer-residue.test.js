@@ -28,6 +28,8 @@ test("leftover composer text is read as residue, an empty prompt is not", () => 
   assert.equal(composerResidue("claude", "❯ Ok lets move on with the second"), "Ok lets move on with the second");
   assert.equal(composerResidue("codex", "› "), "");
   assert.equal(composerResidue("codex", "› half a pasted prompt"), "half a pasted prompt");
+  assert.equal(composerResidue("codex", "› Summarize recent commits", 2), "");
+  assert.equal(composerResidue("codex", "› actual editable input", 23), "actual editable input");
   assert.equal(composerResidue("claude", ""), "");
 });
 

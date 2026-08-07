@@ -485,7 +485,10 @@ class SessionManager {
       // read that is merely too early reports residue, which costs a retry rather than
       // a fused prompt. The common case pays nothing.
       cursorLine = await this.tmux.cursorLine(session.tmuxSessionName).catch(() => "");
-      residue = composerResidue(session.driver, cursorLine);
+      const cursorColumn = typeof this.tmux.cursorColumn === "function"
+        ? await this.tmux.cursorColumn(session.tmuxSessionName).catch(() => null)
+        : null;
+      residue = composerResidue(session.driver, cursorLine, cursorColumn);
       if (!residue) return { ok: true, cursorLine, residue: "" };
     }
     return { ok: false, cursorLine, residue };
