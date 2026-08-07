@@ -475,8 +475,11 @@ class SessionManager {
         // A remnant that survived C-u is usually parked to the right of the cursor.
         await this.tmux.sendKey(session.tmuxSessionName, "C-e");
         await this.tmux.sendKey(session.tmuxSessionName, "C-u");
+        await sleep(COMPOSER_CLEAR_SETTLE_MS);
       }
-      await sleep(COMPOSER_CLEAR_SETTLE_MS);
+      // No settle on the first look: an empty composer reads empty immediately, and a
+      // read that is merely too early reports residue, which costs a retry rather than
+      // a fused prompt. The common case pays nothing.
       cursorLine = await this.tmux.cursorLine(session.tmuxSessionName).catch(() => "");
       residue = composerResidue(session.driver, cursorLine);
       if (!residue) return { ok: true, cursorLine, residue: "" };
