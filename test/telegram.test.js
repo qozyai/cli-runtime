@@ -959,6 +959,117 @@ test("one-time Telegram link binds only its private sender as owner", async (t) 
   }), false);
 });
 
+test("configured system ingress runs on the owner's route with visible provenance", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-system-ingress-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, "main"));
+  const telegramCalls = [];
+  const config = {
+    stateDir: path.join(root, "state"),
+    socketPath: path.join(root, "runtime.sock"),
+    telegram: {
+      token: "token",
+      defaultDriver: "codex",
+      projectsRoot: root,
+      allowedChatIds: new Set(),
+      systemIngressChatIds: new Set(["99"]),
+      burstDebounceMs: 0,
+    },
+  };
+  const adapter = new TelegramAdapter({
+    config,
+    fetchImpl: async (url, options = {}) => {
+      telegramCalls.push({ method: url.split("/").pop(), body: JSON.parse(options.body || "{}") });
+      return { ok: true, json: async () => ({ ok: true, result: { message_id: telegramCalls.length } }) };
+    },
+  });
+  await adapter.init();
+
+  const adminUpdate = {
+    update_id: 7,
+    message: {
+      chat: { id: 99, type: "private" },
+      from: { id: 99, is_bot: false },
+      message_id: 70,
+      text: "Reply with the current state.",
+    },
+  };
+  assert.equal(await adapter.admitUpdate(adminUpdate), null, "an admin cannot claim an unbound agent");
+  assert.equal(await adapter.ownerStore.authorize({
+    chat: { id: 42, type: "private" },
+    from: { id: 42, is_bot: false },
+  }), true);
+  await adapter.routeStore.update("42:main", { driver: "codex", project: "main" });
+
+  const admitted = await adapter.admitUpdate(adminUpdate);
+  assert.ok(admitted);
+  assert.equal(admitted.message.chat.id, "42");
+  assert.equal(admitted.message.chat.type, "private");
+  assert.equal(admitted.message.from.id, 99, "the operator is not rewritten as the owner");
+  assert.equal(Object.hasOwn(admitted.message, "message_thread_id"), false);
+  assert.equal(await adapter.admitUpdate({
+    ...adminUpdate,
+    message: { ...adminUpdate.message, chat: { id: -99, type: "group" } },
+  }), null);
+  assert.equal(await adapter.admitUpdate({
+    ...adminUpdate,
+    message: { ...adminUpdate.message, from: { id: 99, is_bot: true } },
+  }), null);
+  assert.equal(await adapter.admitUpdate({
+    ...adminUpdate,
+    message: { ...adminUpdate.message, chat: { id: 100, type: "private" }, from: { id: 100, is_bot: false } },
+  }), null);
+
+  let dispatched = null;
+  adapter.dispatch = (update, queuePath) => { dispatched = { update, queuePath }; };
+  const queuedUpdate = {
+    ...adminUpdate,
+    update_id: 8,
+    message: { ...adminUpdate.message, message_id: 71 },
+  };
+  await adapter.acceptUpdate(queuedUpdate);
+  assert.equal(dispatched.update.message.chat.id, "42");
+  assert.equal(dispatched.update.message.from.id, 99);
+  const persisted = await readJson(dispatched.queuePath);
+  assert.equal(persisted.message.chat.id, 99, "the original update remains available for crash replay");
+  assert.equal(persisted.message.from.id, 99);
+
+  const sent = [];
+  adapter.send = async (message, text) => { sent.push({ chatId: String(message.chat.id), text }); };
+  adapter.typing = async () => {};
+  adapter.sendStatus = async (message) => {
+    sent.push({ chatId: String(message.chat.id), text: "Working." });
+    return { message_id: 500 };
+  };
+  adapter.ensureSession = async () => ({ status: "ready" });
+  adapter.downloadInputs = async () => [];
+  let submission = null;
+  adapter.runtime = async (method, requestPath, body) => {
+    assert.equal(method, "POST");
+    assert.match(requestPath, /\/submissions$/);
+    submission = body;
+    return { submission: { submissionId: "sub-system" } };
+  };
+  adapter.waitSubmission = async () => ({
+    submissionId: "sub-system",
+    status: "completed",
+    reply: "System request completed.",
+    outputs: [],
+  });
+  adapter.finalizeStatus = async (message, _messageId, text) => {
+    sent.push({ chatId: String(message.chat.id), text });
+  };
+
+  await adapter.handle(admitted.message);
+  assert.deepEqual(sent.map(({ chatId }) => chatId), ["42", "42", "42"]);
+  assert.equal(sent[0].text, "⚙️ System intervention received\n\nReply with the current state.");
+  assert.match(submission.message, /^<system-intervention source="telegram-admin" sender-user-id="99">/);
+  assert.match(submission.message, /not by the Telegram owner/);
+  assert.match(submission.message, /Reply with the current state\./);
+  assert.equal(submission.idempotencyKey, "telegram:system:99:70:owner:42");
+  assert.equal(sent.at(-1).text, "System request completed.");
+});
+
 test("Telegram /attach exposes only global and current-route terminals through the external service", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-attach-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

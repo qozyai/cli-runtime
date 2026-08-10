@@ -7,7 +7,7 @@ const { request } = require("./client");
 const { readJson, sleep, writeAtomic } = require("./util");
 const { mimeTypeFor, safeFilename } = require("./progress");
 const { ProjectCatalog, validProjectName } = require("./project-catalog");
-const { OwnerStore } = require("./owner-store");
+const { OwnerStore, senderUserId, userId } = require("./owner-store");
 const { RouteStore } = require("./route-store");
 const { NoticeSpool, RunMarker, releaseIdFromPath, restartAnnouncement } = require("./notices");
 
@@ -19,6 +19,7 @@ const BARRIER_COMMANDS = new Set(["project", "reset", "driver"]);
 const TELEGRAM_REQUEST_TIMEOUT_MS = 30_000;
 const TELEGRAM_ATTACH_SERVICE_TIMEOUT_MS = 45_000;
 const TELEGRAM_RICH_MESSAGE_LIMIT = 32_768;
+const SYSTEM_INGRESS = Symbol("telegram-system-ingress");
 
 function chunks(text, max = 4000) {
   const characters = Array.from(String(text || ""));
@@ -122,6 +123,21 @@ function submissionMessage(message, repliedInputs = [], repliedWarning = null) {
   return lines.join("\n");
 }
 
+function systemIngress(message) {
+  return message?.[SYSTEM_INGRESS] || null;
+}
+
+function provenanceMessage(message, content) {
+  const ingress = systemIngress(message);
+  if (!ingress) return content;
+  return [
+    `<system-intervention source="telegram-admin" sender-user-id="${ingress.adminUserId}">`,
+    "The following input was authored by a system operator, not by the Telegram owner:",
+    content || "(No text supplied.)",
+    "</system-intervention>",
+  ].join("\n");
+}
+
 function sinceLabel(iso) {
   const at = Date.parse(String(iso || ""));
   if (!Number.isFinite(at)) return null;
@@ -220,7 +236,8 @@ class TelegramAdapter {
     for (const name of queued) {
       const filePath = path.join(this.queueDir, name);
       const update = await readJson(filePath, null);
-      if (update?.message && await this.acceptedMessage(update)) this.dispatch(update, filePath);
+      const admitted = update?.message ? await this.admitUpdate(update) : null;
+      if (admitted) this.dispatch(admitted, filePath);
       else await fs.rm(filePath, { force: true });
     }
   }
@@ -277,6 +294,25 @@ class TelegramAdapter {
       }));
     }
     return sent;
+  }
+
+  async notifySystemIngress(message) {
+    if (!systemIngress(message)) return;
+    const text = messageBody(message);
+    const attachment = this.telegramFile(message);
+    const content = [
+      text,
+      attachment ? `[Attachment: ${attachment.name}]` : "",
+    ].filter(Boolean).join("\n\n") || "(No text supplied.)";
+    await this.send(message, `⚙️ System intervention received\n\n${content}`);
+  }
+
+  submissionIdempotencyKey(message) {
+    const ingress = systemIngress(message);
+    if (ingress) {
+      return `telegram:system:${ingress.adminUserId}:${ingress.sourceMessageId}:owner:${message.chat.id}`;
+    }
+    return `telegram:${message.chat.id}:${message.message_id}`;
   }
 
   async sendStatus(message, text = "Working.") {
@@ -1061,7 +1097,7 @@ class TelegramAdapter {
         }
         inputs.push(...repliedInputs);
         this.checkOperation(operation);
-        const piece = submissionMessage(part, repliedInputs, repliedWarning);
+        const piece = provenanceMessage(part, submissionMessage(part, repliedInputs, repliedWarning));
         if (piece) pieces.push(piece);
       }
       for (const input of inputs) {
@@ -1080,7 +1116,7 @@ class TelegramAdapter {
       const accepted = await this.runtime("POST", `/v1/sessions/${encodeURIComponent(operation.sessionKey)}/submissions`, {
         message: pieces.join("\n"),
         inputs: inputs.map(({ temporary, replyContext, transcriptionError, ...input }) => ({ ...input, transcriptionError })),
-        idempotencyKey: `telegram:${message.chat.id}:${message.message_id}`,
+        idempotencyKey: this.submissionIdempotencyKey(message),
       });
       operation.submissionId = accepted.submission.submissionId;
       if (operation.cancelled || operation.controller.signal.aborted) {
@@ -1142,6 +1178,8 @@ class TelegramAdapter {
     const text = messageBody(message);
     const attached = this.telegramFile(message);
     if (!text && !attached) return;
+    const messages = Array.isArray(parts) && parts.length > 0 ? parts : [message];
+    for (const part of messages) await this.notifySystemIngress(part);
     const command = commandFor(message);
     if (command && CONTROL_COMMANDS.has(command.name)) return this.control(message, command, preparation, droppedBurst);
     if (command?.name === "start") return this.handleStart(message);
@@ -1293,33 +1331,68 @@ class TelegramAdapter {
     this.dispatch({ message });
   }
 
-  async acceptedMessage(update) {
+  systemIngressUpdate(update, owner, adminUserId) {
+    const original = update.message;
+    const message = {
+      ...original,
+      chat: { id: owner.userId, type: "private" },
+    };
+    delete message.message_thread_id;
+    delete message.is_topic_message;
+    Object.defineProperty(message, SYSTEM_INGRESS, {
+      value: Object.freeze({
+        version: 1,
+        source: "telegram-admin",
+        adminUserId,
+        sourceChatId: String(original.chat.id),
+        sourceMessageId: String(original.message_id),
+      }),
+      enumerable: false,
+    });
+    return { ...update, message };
+  }
+
+  async admitUpdate(update) {
     const message = update?.message;
-    if (!message || (!message.text && !message.caption && !this.telegramFile(message))) return false;
-    if (this.ownerStore.get()) return this.ownerStore.authorize(message);
+    if (!message || (!message.text && !message.caption && !this.telegramFile(message))) return null;
+    const owner = this.ownerStore.get();
+    if (owner) {
+      if (await this.ownerStore.authorize(message)) return update;
+      const adminUserId = senderUserId(message);
+      const systemIngressChatIds = this.config.telegram.systemIngressChatIds || new Set();
+      const privateAdminMessage = adminUserId
+        && message?.chat?.type === "private"
+        && userId(message.chat.id) === adminUserId;
+      return privateAdminMessage && systemIngressChatIds.has(adminUserId)
+        ? this.systemIngressUpdate(update, owner, adminUserId)
+        : null;
+    }
     if (this.config.telegram.ownerEnrollmentCodeHash) {
-      if (!matchesOwnerEnrollmentCode(message, this.config.telegram.ownerEnrollmentCodeHash)) {
-        return false;
-      }
-      return this.ownerStore.authorize(message);
+      if (!matchesOwnerEnrollmentCode(message, this.config.telegram.ownerEnrollmentCodeHash)) return null;
+      return await this.ownerStore.authorize(message) ? update : null;
     }
     const admittedChat = this.config.telegram.allowedChatIds.has("*")
       || this.config.telegram.allowedChatIds.has(String(message.chat.id));
-    if (!admittedChat) return false;
-    return this.ownerStore.authorize(message);
+    if (!admittedChat) return null;
+    return await this.ownerStore.authorize(message) ? update : null;
+  }
+
+  async acceptedMessage(update) {
+    return Boolean(await this.admitUpdate(update));
   }
 
   async acceptUpdate(update) {
     const nextOffset = Math.max(this.offset, Number(update.update_id) + 1);
     let queuePath = null;
-    if (await this.acceptedMessage(update)) {
+    const admitted = await this.admitUpdate(update);
+    if (admitted) {
       queuePath = path.join(this.queueDir, `${Number(update.update_id)}.json`);
       const existing = await readJson(queuePath, null);
       if (!existing) await writeAtomic(queuePath, update);
     }
     this.offset = nextOffset;
     await writeAtomic(this.offsetPath, { version: 1, offset: this.offset });
-    if (queuePath) this.dispatch(update, queuePath);
+    if (queuePath) this.dispatch(admitted, queuePath);
   }
 
   // Notices carry their own route; anything else is operational and goes to the

@@ -41,6 +41,22 @@ function telegramOwnerEnrollmentCodeHash(env) {
   return value;
 }
 
+function telegramSystemIngressChatIds(env) {
+  const key = "CLI_RUNTIME_TELEGRAM_SYSTEM_INGRESS_CHATS";
+  const values = String(env[key] || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (values.length > 32) throw configError(`${key} may contain at most 32 Telegram user IDs`);
+  if (values.some((value) => !/^[1-9]\d{0,19}$/.test(value))) {
+    throw configError(`${key} must contain only positive Telegram user IDs`);
+  }
+  if (new Set(values).size !== values.length) {
+    throw configError(`${key} must not contain duplicate Telegram user IDs`);
+  }
+  return new Set(values);
+}
+
 function telegramProjectsRoot(env, { required = false } = {}) {
   const key = "CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT";
   const present = Object.prototype.hasOwnProperty.call(env, key);
@@ -127,6 +143,7 @@ function loadConfig(env = process.env, { requireTelegramProjectsRoot = false } =
         .split(",")
         .map((item) => item.trim())
         .filter(Boolean)),
+      systemIngressChatIds: telegramSystemIngressChatIds(env),
       ownerEnrollmentCodeHash: telegramOwnerEnrollmentCodeHash(env),
     },
   };

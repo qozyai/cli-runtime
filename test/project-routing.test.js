@@ -106,6 +106,27 @@ test("Telegram projects-root configuration is explicit and rejects dangerous roo
   const config = loadConfig({ ...base, CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT: root }, { requireTelegramProjectsRoot: true });
   assert.equal(config.telegram.projectsRoot, await fs.realpath(root));
   assert.equal(Object.hasOwn(config.telegram, "workspace"), false);
+  const ingress = loadConfig({
+    ...base,
+    CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT: root,
+    CLI_RUNTIME_TELEGRAM_SYSTEM_INGRESS_CHATS: "99,123456789",
+  });
+  assert.deepEqual([...ingress.telegram.systemIngressChatIds], ["99", "123456789"]);
+  assert.throws(() => loadConfig({
+    ...base,
+    CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT: root,
+    CLI_RUNTIME_TELEGRAM_SYSTEM_INGRESS_CHATS: "*",
+  }), /positive Telegram user IDs/);
+  assert.throws(() => loadConfig({
+    ...base,
+    CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT: root,
+    CLI_RUNTIME_TELEGRAM_SYSTEM_INGRESS_CHATS: "99,99",
+  }), /must not contain duplicate/);
+  assert.throws(() => loadConfig({
+    ...base,
+    CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT: root,
+    CLI_RUNTIME_TELEGRAM_SYSTEM_INGRESS_CHATS: Array.from({ length: 33 }, (_, index) => index + 1).join(","),
+  }), /at most 32/);
 });
 
 test("topic identity requires Telegram's topic marker on routes and outbound calls", async (t) => {
