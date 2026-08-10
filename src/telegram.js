@@ -358,6 +358,24 @@ class TelegramAdapter {
     return lines.join("\n");
   }
 
+  async attentionMessage(driver, session) {
+    const name = driver === "claude" ? "Claude Code" : "Codex";
+    let terminal = true;
+    try {
+      await this.runtime("POST", `/v1/auth/${driver}/start`, { force: false });
+    } catch (err) {
+      terminal = false;
+      this.log(`[telegram] could not start ${driver} troubleshooting terminal: ${err.message}`);
+    }
+    const lines = [`The ${name} session needs attention: ${session.lastError || session.status}`];
+    if (terminal) {
+      lines.push("", `Use /attach and choose ${name} authentication to inspect or log in, then send your message again.`);
+    } else {
+      lines.push("", "The manual terminal could not be started. Try /attach again shortly, then resend your message.");
+    }
+    return lines.join("\n");
+  }
+
   async ensureSession(message, driver, project) {
     const sessionKey = this.sessionKey(message, project.path);
     const key = encodeURIComponent(sessionKey);
@@ -1019,7 +1037,7 @@ class TelegramAdapter {
         }
       }
       if (session.status !== "ready") {
-        await this.send(message, `The ${route.driver === "claude" ? "Claude Code" : "Codex"} session needs attention: ${session.lastError || session.status}`);
+        await this.send(message, await this.attentionMessage(route.driver, session));
         return;
       }
       // Each part contributes what it would have contributed alone, including its own

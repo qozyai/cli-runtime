@@ -586,6 +586,40 @@ test("Telegram exposes a manual auth terminal after a real retry still requires 
   assert.ok(sent.some((text) => /Use \/attach.*Codex authentication/s.test(text)));
 });
 
+test("Telegram exposes a manual terminal after an unclassified startup failure", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-startup-attention-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const adapter = new TelegramAdapter({
+    config: {
+      stateDir: root,
+      socketPath: path.join(root, "runtime.sock"),
+      telegram: { token: "token", defaultDriver: "claude", projectsRoot: root, allowedChatIds: new Set() },
+    },
+    fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true, result: { message_id: 1 } }) }),
+  });
+  await adapter.init();
+  await bindRoute(adapter, root, "42:main");
+  await adapter.routeStore.update("42:main", { driver: "claude", project: "project" });
+  adapter.ensureSession = async () => ({ status: "attention_required" });
+  const calls = [];
+  adapter.runtime = async (method, requestPath) => {
+    calls.push(`${method} ${requestPath}`);
+    if (requestPath.endsWith("/restart")) {
+      return { session: { status: "attention_required", lastError: "pane exited before startup" } };
+    }
+    if (requestPath === "/v1/auth/claude/start") return { auth: { phase: "interactive" } };
+    throw new Error(`unexpected runtime call: ${method} ${requestPath}`);
+  };
+  const sent = [];
+  adapter.send = async (_message, text) => { sent.push(text); };
+
+  await adapter.handle({ chat: { id: 42 }, message_id: 10, text: "retry after startup failure" });
+
+  assert.equal(calls.some((call) => call.includes("/auth/claude/status")), false);
+  assert.equal(calls.at(-1), "POST /v1/auth/claude/start");
+  assert.ok(sent.some((text) => /pane exited before startup.*Use \/attach.*Claude Code authentication/s.test(text)));
+});
+
 test("Telegram persists accepted updates before advancing offset and replays queued work", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-queue-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
