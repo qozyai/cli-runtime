@@ -74,7 +74,7 @@ test("Telegram remains a thin adapter over the runtime API", async (t) => {
   await adapter.handle(message(4, "hello from Codex"));
 
   const sent = telegramCalls.filter((call) => call.method === "sendMessage").map((call) => call.body.text);
-  assert.ok(sent.some((text) => /Claude Code is authenticated/.test(text)));
+  assert.ok(sent.some((text) => /Claude Code.*will be attempted/.test(text)));
   assert.ok(sent.includes("Codex selected. The next message starts or resumes its own conversation lazily; Claude Code chat context is not transferred."));
   assert.ok(telegramCalls.some((call) => call.method === "sendChatAction"));
   const edits = telegramCalls.filter((call) => call.method === "editMessageText");
@@ -502,7 +502,7 @@ test("Telegram does not redeliver outputs that were already acknowledged", async
   assert.equal(runtimeCalls.some((call) => call.requestPath.includes("/outputs/ack")), false);
 });
 
-test("Telegram restarts an auth-required session after provider login", async (t) => {
+test("Telegram retries an auth-required session without an auth status gate", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-auth-recovery-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const adapter = new TelegramAdapter({
@@ -526,9 +526,6 @@ test("Telegram restarts an auth-required session after provider login", async (t
   adapter.ensureSession = async () => ({ status: "auth_required" });
   adapter.runtime = async (method, requestPath) => {
     runtimeCalls.push({ method, requestPath });
-    if (method === "GET" && requestPath === "/v1/auth/codex/status") {
-      return { auth: { authenticated: true } };
-    }
     if (method === "POST" && requestPath.endsWith("/restart")) {
       return { session: { status: "ready" } };
     }
@@ -552,10 +549,41 @@ test("Telegram restarts an auth-required session after provider login", async (t
 
   const encodedSession = encodeURIComponent(`telegram:42:main:${path.join(root, "project")}`);
   assert.deepEqual(runtimeCalls.map(({ method, requestPath }) => `${method} ${requestPath}`), [
-    "GET /v1/auth/codex/status",
     `POST /v1/sessions/${encodedSession}/restart`,
     `POST /v1/sessions/${encodedSession}/submissions`,
   ]);
+});
+
+test("Telegram exposes a manual auth terminal after a real retry still requires login", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-manual-auth-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const adapter = new TelegramAdapter({
+    config: {
+      stateDir: root,
+      socketPath: path.join(root, "runtime.sock"),
+      telegram: { token: "token", defaultDriver: "codex", projectsRoot: root, allowedChatIds: new Set() },
+    },
+    fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true, result: { message_id: 1 } }) }),
+  });
+  await adapter.init();
+  await bindRoute(adapter, root, "42:main");
+  await adapter.routeStore.update("42:main", { driver: "codex", project: "project" });
+  adapter.ensureSession = async () => ({ status: "auth_required" });
+  const calls = [];
+  adapter.runtime = async (method, requestPath) => {
+    calls.push(`${method} ${requestPath}`);
+    if (requestPath.endsWith("/restart")) return { session: { status: "auth_required" } };
+    if (requestPath === "/v1/auth/codex/start") return { auth: { phase: "interactive" } };
+    throw new Error(`unexpected runtime call: ${method} ${requestPath}`);
+  };
+  const sent = [];
+  adapter.send = async (_message, text) => { sent.push(text); };
+
+  await adapter.handle({ chat: { id: 42 }, message_id: 9, text: "try logged out" });
+
+  assert.equal(calls.some((call) => call.includes("/auth/codex/status")), false);
+  assert.equal(calls.at(-1), "POST /v1/auth/codex/start");
+  assert.ok(sent.some((text) => /Use \/attach.*Codex authentication/s.test(text)));
 });
 
 test("Telegram persists accepted updates before advancing offset and replays queued work", async (t) => {

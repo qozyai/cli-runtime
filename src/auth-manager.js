@@ -151,8 +151,6 @@ class AuthManager {
   }
 
   async startLocked(driver, { force = false } = {}) {
-    const existing = await this.status(driver);
-    if (existing.authenticated && !force) return { ...existing, phase: "completed" };
     const selected = driverConfig(this.config, driver);
     const sessionName = this.sessionName(driver);
     const workspace = path.join(this.authDir, driver);
@@ -160,8 +158,8 @@ class AuthManager {
     if (!force && await this.tmux.has(sessionName)) {
       const current = this.parseAuthPrompt(driver, await this.authScreen(driver));
       const processState = await this.tmux.driverState(sessionName).catch(() => ({ paneDead: true }));
-      if (!processState.paneDead && ["starting", "awaiting_code", "awaiting_browser"].includes(current.phase)) {
-        return { driver, authenticated: false, state: "unauthenticated", ...current, attachCommand: this.tmux.attachCommand(sessionName) };
+      if (!processState.paneDead) {
+        return { driver, authenticated: null, state: "interactive", ...current, attachCommand: this.tmux.attachCommand(sessionName) };
       }
     }
     await this.tmux.kill(sessionName);
@@ -172,62 +170,18 @@ class AuthManager {
       DISABLE_AUTOUPDATER: "1",
     });
     this.note("auth.started", { driver });
-
-    const deadline = Date.now() + this.config.startupTimeoutMs;
-    let last = { phase: "starting", url: null, code: null, screen: "" };
-    let nextNavigationAt = Date.now() + 2000;
-    let navigationAttempt = 0;
-    while (Date.now() < deadline) {
-      const processState = await this.tmux.driverState(sessionName).catch((err) => ({ paneDead: true, error: err.message }));
-      if (processState.paneDead) {
-        last = {
-          ...last,
-          phase: "failed",
-          error: processState.error || `authentication process exited (${processState.exitCode ?? "unknown"})`,
-        };
-        break;
-      }
-      const screen = await this.authScreen(driver);
-      last = this.parseAuthPrompt(driver, screen);
-      if (last.phase !== "starting") break;
-      if (driver === "claude") {
-        if (/Choose the text style/i.test(screen) || /Select login method/i.test(screen)) {
-          await this.tmux.sendKey(sessionName, "Enter");
-        } else if (isReady(driver, screen)) {
-          await this.tmux.sendLiteral(sessionName, "/login");
-          await this.tmux.sendKey(sessionName, "Enter");
-        }
-      }
-      if (last.phase === "starting" && this.navigator?.enabled && Date.now() >= nextNavigationAt) {
-        navigationAttempt += 1;
-        try {
-          const decision = await this.navigator.decide({
-            driver,
-            phase: "authentication",
-            goal: "Reach the provider's browser authorization URL/code prompt or a completed login state.",
-            screen,
-            sessionKey: `auth:${driver}`,
-            attempt: navigationAttempt,
-          });
-          if (decision?.action === "fail") {
-            last = { ...last, phase: "failed", screen, error: decision.reason || "navigation failed" };
-            break;
-          }
-          await this.navigator.apply(this.tmux, sessionName, decision);
-        } catch (err) {
-          this.note("navigation.error", {
-            sessionKey: `auth:${driver}`,
-            driver,
-            phase: "authentication",
-            error: tailText(err.message || String(err), 2000),
-          });
-        }
-        nextNavigationAt = Date.now() + 2000;
-      }
-      await sleep(300);
+    // Authentication is deliberately human-driven. Give the provider process a
+    // moment to fail fast, but do not navigate its TUI or wait for a URL.
+    await sleep(100);
+    const processState = await this.tmux.driverState(sessionName).catch((err) => ({ paneDead: true, error: err.message }));
+    const screen = await this.authScreen(driver).catch(() => "");
+    const current = this.parseAuthPrompt(driver, screen);
+    if (processState.paneDead) {
+      const error = processState.error || `authentication process exited (${processState.exitCode ?? "unknown"})`;
+      this.note("auth.failed", { driver, error });
+      return { driver, authenticated: false, state: "unauthenticated", ...current, phase: "failed", error, attachCommand: this.tmux.attachCommand(sessionName) };
     }
-    this.note(`auth.${last.phase}`, { driver, url: last.url, code: last.code });
-    return { driver, authenticated: last.phase === "completed", ...last, attachCommand: this.tmux.attachCommand(sessionName) };
+    return { driver, authenticated: null, state: "interactive", ...current, attachCommand: this.tmux.attachCommand(sessionName) };
   }
 
   async submit(driverValue, codeValue) {

@@ -344,13 +344,17 @@ class TelegramAdapter {
   }
 
   async authMessage(driver, force = false) {
-    const started = await this.runtime("POST", `/v1/auth/${driver}/start`, { force });
-    const auth = started.auth;
-    if (auth.phase === "completed") return `${driver === "claude" ? "Claude Code" : "Codex"} is authenticated.`;
-    const lines = [`${driver === "claude" ? "Claude Code" : "Codex"} needs authentication.`];
-    if (auth.url) lines.push("", auth.url);
-    if (auth.code) lines.push("", `Code: ${auth.code}`);
-    lines.push("", "Complete authentication, then send another message.");
+    const name = driver === "claude" ? "Claude Code" : "Codex";
+    let terminal = true;
+    try {
+      await this.runtime("POST", `/v1/auth/${driver}/start`, { force });
+    } catch (err) {
+      terminal = false;
+      this.log(`[telegram] could not start ${driver} authentication terminal: ${err.message}`);
+    }
+    const lines = [`This attempt failed because ${name} needs authentication.`];
+    if (terminal) lines.push("", `Use /attach, choose ${name} authentication, complete login in the terminal, then send your message again.`);
+    else lines.push("", "The authentication terminal could not be started. Try /attach again shortly, then resend your message.");
     return lines.join("\n");
   }
 
@@ -963,16 +967,7 @@ class TelegramAdapter {
       await this.sendCatalogError(message, err, route.project);
       return;
     }
-    const status = await this.runtime("GET", `/v1/auth/${route.driver}/status`);
-    if (status.auth.state === "unknown") {
-      await this.send(message, `Could not verify ${route.driver === "claude" ? "Claude Code" : "Codex"} authentication: ${status.auth.error || "unknown error"}`);
-      return;
-    }
-    if (!status.auth.authenticated) {
-      await this.send(message, await this.authMessage(route.driver));
-      return;
-    }
-    await this.send(message, `Project "${route.project}" is selected and ${route.driver === "claude" ? "Claude Code" : "Codex"} is authenticated. Send a message to start lazily.`);
+    await this.send(message, `Project "${route.project}" is selected with ${route.driver === "claude" ? "Claude Code" : "Codex"}. Send a message and the driver will be attempted.`);
   }
 
   async handleOrdinary(message, route, ordinal = 0, parts = null) {
@@ -1006,13 +1001,9 @@ class TelegramAdapter {
       let session = await this.ensureSession(message, route.driver, project);
       this.checkOperation(operation);
       if (session.status === "auth_required") {
-        const status = await this.runtime("GET", `/v1/auth/${route.driver}/status`);
+        const restarted = await this.runtime("POST", `/v1/sessions/${encodeURIComponent(operation.sessionKey)}/restart`, {});
         this.checkOperation(operation);
-        if (status.auth.authenticated) {
-          const restarted = await this.runtime("POST", `/v1/sessions/${encodeURIComponent(operation.sessionKey)}/restart`, {});
-          this.checkOperation(operation);
-          session = restarted.session;
-        }
+        session = restarted.session;
         if (session.status === "auth_required") {
           await this.send(message, await this.authMessage(route.driver));
           return;
