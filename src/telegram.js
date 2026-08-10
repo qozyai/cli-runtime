@@ -17,6 +17,7 @@ const CONTROL_COMMANDS = new Set(["project", "status", "stop", "reset", "driver"
 const IMMEDIATE_COMMANDS = new Set(["status", "stop", "attach"]);
 const BARRIER_COMMANDS = new Set(["project", "reset", "driver"]);
 const TELEGRAM_REQUEST_TIMEOUT_MS = 30_000;
+const TELEGRAM_ATTACH_SERVICE_TIMEOUT_MS = 45_000;
 const TELEGRAM_RICH_MESSAGE_LIMIT = 32_768;
 
 function chunks(text, max = 4000) {
@@ -838,7 +839,7 @@ class TelegramAdapter {
     const controller = new AbortController();
     const timeout = setTimeout(
       () => controller.abort(),
-      this.config.telegram.attachServiceTimeoutMs || TELEGRAM_REQUEST_TIMEOUT_MS,
+      this.config.telegram.attachServiceTimeoutMs || TELEGRAM_ATTACH_SERVICE_TIMEOUT_MS,
     );
     let result;
     try {
