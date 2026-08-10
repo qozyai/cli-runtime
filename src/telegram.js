@@ -265,8 +265,11 @@ class TelegramAdapter {
   }
 
   routeState(message) {
-    return this.routeStore.get(this.routeKey(message)) || Object.freeze({
-      driver: this.config.telegram.defaultDriver,
+    const saved = this.routeStore.get(this.routeKey(message));
+    const project = saved?.project || this.config.telegram.defaultProject;
+    return Object.freeze({
+      driver: saved?.driver || this.config.telegram.defaultDriver,
+      ...(project ? { project } : {}),
     });
   }
 

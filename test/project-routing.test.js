@@ -127,6 +127,17 @@ test("Telegram projects-root configuration is explicit and rejects dangerous roo
     CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT: root,
     CLI_RUNTIME_TELEGRAM_SYSTEM_INGRESS_CHATS: Array.from({ length: 33 }, (_, index) => index + 1).join(","),
   }), /at most 32/);
+  const defaultProject = loadConfig({
+    ...base,
+    CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT: root,
+    CLI_RUNTIME_TELEGRAM_DEFAULT_PROJECT: "main",
+  });
+  assert.equal(defaultProject.telegram.defaultProject, "main");
+  assert.throws(() => loadConfig({
+    ...base,
+    CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT: root,
+    CLI_RUNTIME_TELEGRAM_DEFAULT_PROJECT: "bad project",
+  }), /ASCII letters/);
 });
 
 test("topic identity requires Telegram's topic marker on routes and outbound calls", async (t) => {
@@ -177,6 +188,30 @@ test("an unbound route neither creates a session nor downloads its attachment", 
     document: { file_id: "file", file_name: "input.txt", file_size: 10 },
   });
   assert.deepEqual(sent, ["No project is selected. Use /project <name>."]);
+});
+
+test("a configured default project makes a new Telegram route immediately usable", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-default-project-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, "main"));
+  const adapter = new TelegramAdapter({
+    config: {
+      stateDir: path.join(root, "state"),
+      telegram: {
+        token: "token",
+        defaultDriver: "codex",
+        defaultProject: "main",
+        projectsRoot: root,
+        allowedChatIds: new Set(),
+      },
+    },
+  });
+  await adapter.init();
+  assert.deepEqual(adapter.routeState({ chat: { id: 42 } }), { driver: "codex", project: "main" });
+  await adapter.routeStore.update("42:main", { driver: "claude" });
+  assert.deepEqual(adapter.routeState({ chat: { id: 42 } }), { driver: "claude", project: "main" });
+  await adapter.routeStore.update("42:main", { driver: "claude", project: "other" });
+  assert.deepEqual(adapter.routeState({ chat: { id: 42 } }), { driver: "claude", project: "other" });
 });
 
 test("project is the only project-selection command", () => {

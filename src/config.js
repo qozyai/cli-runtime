@@ -57,6 +57,15 @@ function telegramSystemIngressChatIds(env) {
   return new Set(values);
 }
 
+function telegramDefaultProject(env) {
+  const key = "CLI_RUNTIME_TELEGRAM_DEFAULT_PROJECT";
+  const value = String(env[key] || "").trim();
+  if (value && !/^[A-Za-z0-9_-]+$/.test(value)) {
+    throw configError(`${key} may use only ASCII letters, digits, underscore, and hyphen`);
+  }
+  return value;
+}
+
 function telegramProjectsRoot(env, { required = false } = {}) {
   const key = "CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT";
   const present = Object.prototype.hasOwnProperty.call(env, key);
@@ -128,6 +137,7 @@ function loadConfig(env = process.env, { requireTelegramProjectsRoot = false } =
     telegram: {
       token: String(env.TELEGRAM_BOT_TOKEN || "").trim(),
       defaultDriver: String(env.CLI_RUNTIME_TELEGRAM_DRIVER || "claude").trim().toLowerCase(),
+      defaultProject: telegramDefaultProject(env),
       projectsRoot: telegramProjectsRoot(env, { required: requireTelegramProjectsRoot }),
       statusEditIntervalMs: positiveNumber(env.CLI_RUNTIME_TELEGRAM_STATUS_EDIT_MS, 5000),
       maxFileBytes: positiveNumber(env.CLI_RUNTIME_TELEGRAM_MAX_FILE_BYTES, 20 * 1024 * 1024),
