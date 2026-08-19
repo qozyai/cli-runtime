@@ -5,8 +5,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const { OwnerStore } = require("../src/owner-store");
-const { readJson } = require("../src/util");
+const { OwnerStore } = require("../src/surface/owner-store");
+const { readJson } = require("../src/core/util");
 
 function direct(userId, text = "hello") {
   return {

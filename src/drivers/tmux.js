@@ -2,7 +2,7 @@
 
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
-const { isolatedProcessEnv, shellQuote, sleep } = require("./util");
+const { isolatedProcessEnv, shellQuote, sleep } = require("../core/util");
 
 const execFileAsync = promisify(execFile);
 const EXIT_STATUS_WAIT_MS = 250;

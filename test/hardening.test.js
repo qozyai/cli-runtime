@@ -5,11 +5,11 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const { EventStore } = require("../src/event-store");
-const { redactText } = require("../src/progress");
-const { acquireRuntimeLock } = require("../src/runtime-lock");
-const { Tmux } = require("../src/tmux");
-const { isReady } = require("../src/drivers");
+const { EventStore } = require("../src/core/event-store");
+const { redactText } = require("../src/core/progress");
+const { acquireRuntimeLock } = require("../src/core/runtime-lock");
+const { Tmux } = require("../src/drivers/tmux");
+const { isReady } = require("../src/drivers/drivers");
 const { parseSendArguments } = require("../src/main");
 
 test("redaction removes opaque bearer and quoted secret values", () => {

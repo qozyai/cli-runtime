@@ -5,7 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const { AuthManager, terminalUrls } = require("../src/auth-manager");
+const { AuthManager, terminalUrls } = require("../src/drivers/auth-manager");
 
 test("auth navigation recognizes wrapped current provider URLs", () => {
   const claude = [

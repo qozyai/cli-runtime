@@ -11,7 +11,7 @@ const {
   isStartupAuthScreen,
   normalizeDriver,
   recentScreen,
-} = require("./drivers");
+} = require("../drivers/drivers");
 const { baselineArtifacts, historyProgress, publicProgress, watchArtifacts } = require("./artifacts");
 const {
   SUBMISSION_SOURCE_OWNER,

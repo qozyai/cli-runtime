@@ -5,10 +5,10 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const { Navigator, normalizeDecision } = require("../src/navigator");
-const { EventStore } = require("../src/event-store");
-const { Tmux } = require("../src/tmux");
-const { SessionManager } = require("../src/session-manager");
+const { Navigator, normalizeDecision } = require("../src/drivers/navigator");
+const { EventStore } = require("../src/core/event-store");
+const { Tmux } = require("../src/drivers/tmux");
+const { SessionManager } = require("../src/core/session-manager");
 
 test("navigator exposes a bounded driver-neutral recovery contract", async () => {
   let requestBody = null;

@@ -6,10 +6,10 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { loadConfig } = require("../src/config");
-const { ProjectCatalog } = require("../src/project-catalog");
-const { RouteStore } = require("../src/route-store");
-const { CONTROL_COMMANDS, TelegramAdapter, topicThreadId } = require("../src/telegram");
-const { readJson } = require("../src/util");
+const { ProjectCatalog } = require("../src/surface/project-catalog");
+const { RouteStore } = require("../src/surface/route-store");
+const { CONTROL_COMMANDS, TelegramAdapter, topicThreadId } = require("../src/surface/telegram");
+const { readJson } = require("../src/core/util");
 
 test("project catalog exposes only canonical direct ASCII-named directories", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-catalog-"));

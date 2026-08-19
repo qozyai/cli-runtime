@@ -3,21 +3,21 @@
 
 const { spawnSync } = require("node:child_process");
 const { loadConfig } = require("./config");
-const { EventStore } = require("./event-store");
-const { Tmux } = require("./tmux");
-const { SessionManager } = require("./session-manager");
-const { AuthManager } = require("./auth-manager");
-const { createServer } = require("./server");
-const { request } = require("./client");
-const { TelegramAdapter } = require("./telegram");
-const { Navigator } = require("./navigator");
-const { OpenAIHelper } = require("./openai-helper");
-const { acquireRuntimeLock } = require("./runtime-lock");
-const { sleep } = require("./util");
+const { EventStore } = require("./core/event-store");
+const { Tmux } = require("./drivers/tmux");
+const { SessionManager } = require("./core/session-manager");
+const { AuthManager } = require("./drivers/auth-manager");
+const { createServer } = require("./core/server");
+const { request } = require("./core/client");
+const { TelegramAdapter } = require("./surface/telegram");
+const { Navigator } = require("./drivers/navigator");
+const { OpenAIHelper } = require("./surface/openai-helper");
+const { acquireRuntimeLock } = require("./core/runtime-lock");
+const { sleep } = require("./core/util");
 const fs = require("node:fs/promises");
 const path = require("node:path");
-const { replayArtifact } = require("./artifacts");
-const { blockingVersionFailures, describeVersionCheck, verifyDriverVersions } = require("./driver-version");
+const { replayArtifact } = require("./core/artifacts");
+const { blockingVersionFailures, describeVersionCheck, verifyDriverVersions } = require("./drivers/driver-version");
 
 async function createRuntime(config = loadConfig()) {
   const ownershipLock = await acquireRuntimeLock(config.stateDir);

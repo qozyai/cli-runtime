@@ -1,7 +1,7 @@
 "use strict";
 
-const { redactText } = require("./progress");
-const { tailText } = require("./util");
+const { redactText } = require("../core/progress");
+const { tailText } = require("../core/util");
 
 const ACTIONS = new Set(["wait", "press_key", "submit_text", "auth_required", "fail"]);
 const KEYS = new Set(["Enter", "Escape", "Tab", "Up", "Down", "Left", "Right", ...Array.from({ length: 10 }, (_, index) => String(index))]);

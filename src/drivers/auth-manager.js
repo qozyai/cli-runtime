@@ -5,7 +5,7 @@ const path = require("node:path");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const { authCommand, driverConfig, isReady, normalizeDriver, recentScreen } = require("./drivers");
-const { isolatedProcessEnv, safeId, sleep, tailText } = require("./util");
+const { isolatedProcessEnv, safeId, sleep, tailText } = require("../core/util");
 
 const execFileAsync = promisify(execFile);
 

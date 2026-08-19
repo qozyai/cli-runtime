@@ -5,11 +5,11 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const { watchArtifacts } = require("../src/artifacts");
+const { watchArtifacts } = require("../src/core/artifacts");
 const { loadConfig } = require("../src/config");
-const { EventStore } = require("../src/event-store");
-const { Tmux } = require("../src/tmux");
-const { SessionManager } = require("../src/session-manager");
+const { EventStore } = require("../src/core/event-store");
+const { Tmux } = require("../src/drivers/tmux");
+const { SessionManager } = require("../src/core/session-manager");
 
 function claudeUser(marker) {
   return { type: "user", sessionId: "claude-session", message: { content: marker } };

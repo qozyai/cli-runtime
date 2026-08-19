@@ -2,7 +2,7 @@
 
 const fs = require("node:fs/promises");
 const path = require("node:path");
-const { tailText } = require("./util");
+const { tailText } = require("../core/util");
 
 const NAVIGATION_SCHEMA = {
   name: "navigation_decision",

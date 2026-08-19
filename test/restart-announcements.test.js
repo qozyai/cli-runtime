@@ -5,8 +5,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const { NoticeSpool, RunMarker, releaseIdFromPath, restartAnnouncement } = require("../src/notices");
-const { TelegramAdapter } = require("../src/telegram");
+const { NoticeSpool, RunMarker, releaseIdFromPath, restartAnnouncement } = require("../src/core/notices");
+const { TelegramAdapter } = require("../src/surface/telegram");
 
 async function spoolRoot(t, label) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), `cli-runtime-${label}-`));

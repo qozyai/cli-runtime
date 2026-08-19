@@ -6,10 +6,10 @@ const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const { EventStore } = require("../src/event-store");
-const { buildPromptDelivery, MAX_INLINE_PROMPT_BYTES, SessionManager } = require("../src/session-manager");
-const { isCollapsedPasteReceipt, isPastedPromptEditable } = require("../src/drivers");
-const { Tmux } = require("../src/tmux");
+const { EventStore } = require("../src/core/event-store");
+const { buildPromptDelivery, MAX_INLINE_PROMPT_BYTES, SessionManager } = require("../src/core/session-manager");
+const { isCollapsedPasteReceipt, isPastedPromptEditable } = require("../src/drivers/drivers");
+const { Tmux } = require("../src/drivers/tmux");
 
 async function waitFor(fn, timeoutMs = 10_000) {
   const deadline = Date.now() + timeoutMs;

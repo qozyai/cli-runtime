@@ -3,7 +3,7 @@
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const { normalizeDriver, parseDriverVersion, versionCommand } = require("./drivers");
-const { isolatedProcessEnv } = require("./util");
+const { isolatedProcessEnv } = require("../core/util");
 
 const execFileAsync = promisify(execFile);
 

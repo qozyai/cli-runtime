@@ -2,7 +2,7 @@
 
 const fs = require("node:fs/promises");
 const path = require("node:path");
-const { writeAtomic } = require("./util");
+const { writeAtomic } = require("../core/util");
 const { validProjectName } = require("./project-catalog");
 
 const ROUTE_KEY_PATTERN = /^-?\d+:(?:main|\d+)$/;

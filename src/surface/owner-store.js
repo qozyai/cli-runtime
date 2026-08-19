@@ -2,7 +2,7 @@
 
 const fs = require("node:fs/promises");
 const path = require("node:path");
-const { nowIso, writeAtomic } = require("./util");
+const { nowIso, writeAtomic } = require("../core/util");
 
 const TELEGRAM_USER_ID_PATTERN = /^[1-9]\d{0,19}$/;
 const GROUP_CHAT_TYPES = new Set(["group", "supergroup"]);

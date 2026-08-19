@@ -5,9 +5,9 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const { EventStore } = require("../src/event-store");
-const { SessionManager } = require("../src/session-manager");
-const { WorkspaceState } = require("../src/workspace-state");
+const { EventStore } = require("../src/core/event-store");
+const { SessionManager } = require("../src/core/session-manager");
+const { WorkspaceState } = require("../src/core/workspace-state");
 
 async function managerFixture(t, tmuxOverrides = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-correctness-"));

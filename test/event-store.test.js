@@ -5,7 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const { EventStore } = require("../src/event-store");
+const { EventStore } = require("../src/core/event-store");
 
 test("event replay stays monotonic across compaction and restart", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-events-"));

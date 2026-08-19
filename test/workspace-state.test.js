@@ -5,9 +5,9 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const { WorkspaceState, readJsonlLossless, selectRecentTurns } = require("../src/workspace-state");
-const { normalizeProgress, summarizeProgress } = require("../src/progress");
-const { historyProgress, publicProgress } = require("../src/artifacts");
+const { WorkspaceState, readJsonlLossless, selectRecentTurns } = require("../src/core/workspace-state");
+const { normalizeProgress, summarizeProgress } = require("../src/core/progress");
+const { historyProgress, publicProgress } = require("../src/core/artifacts");
 
 async function fixture(t, config = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-workspace-"));

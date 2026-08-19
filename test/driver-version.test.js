@@ -3,8 +3,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { loadConfig } = require("../src/config");
-const { parseDriverVersion, versionCommand } = require("../src/drivers");
-const { blockingVersionFailures, describeVersionCheck, verifyDriverVersion } = require("../src/driver-version");
+const { parseDriverVersion, versionCommand } = require("../src/drivers/drivers");
+const { blockingVersionFailures, describeVersionCheck, verifyDriverVersion } = require("../src/drivers/driver-version");
 const { reportDriverVersions } = require("../src/main");
 
 // Real output from both drivers as shipped: neither prints a bare semver, and the

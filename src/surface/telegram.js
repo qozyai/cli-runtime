@@ -3,13 +3,13 @@
 const { createHash, timingSafeEqual } = require("node:crypto");
 const fs = require("node:fs/promises");
 const path = require("node:path");
-const { request } = require("./client");
-const { SUBMISSION_SOURCE_OWNER, readJson, sleep, writeAtomic } = require("./util");
-const { mimeTypeFor, safeFilename } = require("./progress");
+const { request } = require("../core/client");
+const { SUBMISSION_SOURCE_OWNER, readJson, sleep, writeAtomic } = require("../core/util");
+const { mimeTypeFor, safeFilename } = require("../core/progress");
 const { ProjectCatalog, validProjectName } = require("./project-catalog");
 const { OwnerStore, senderUserId, userId } = require("./owner-store");
 const { RouteStore } = require("./route-store");
-const { NoticeSpool, RunMarker, releaseIdFromPath, restartAnnouncement } = require("./notices");
+const { NoticeSpool, RunMarker, releaseIdFromPath, restartAnnouncement } = require("../core/notices");
 
 const TELEGRAM_DOCUMENT_LIMIT = 50 * 1024 * 1024;
 const TERMINAL_SUBMISSION_STATES = new Set(["completed", "failed", "interrupted"]);

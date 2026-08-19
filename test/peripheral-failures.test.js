@@ -8,10 +8,10 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const { Tmux } = require("../src/tmux");
-const { SessionManager } = require("../src/session-manager");
-const { TelegramAdapter } = require("../src/telegram");
-const { EventStore } = require("../src/event-store");
+const { Tmux } = require("../src/drivers/tmux");
+const { SessionManager } = require("../src/core/session-manager");
+const { TelegramAdapter } = require("../src/surface/telegram");
+const { EventStore } = require("../src/core/event-store");
 const { installRejectionBackstop } = require("../src/main");
 
 async function waitFor(fn, timeoutMs = 15_000) {

@@ -6,7 +6,7 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { loadConfig } = require("../src/config");
-const { OpenAIHelper } = require("../src/openai-helper");
+const { OpenAIHelper } = require("../src/surface/openai-helper");
 
 test("OpenAI navigation defaults to GPT-5.6 Luna", () => {
   const config = loadConfig({ HOME: "/tmp" });

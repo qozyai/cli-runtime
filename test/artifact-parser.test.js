@@ -5,8 +5,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const { createArtifactParser, replayArtifact } = require("../src/artifact-parser");
-const { watchArtifacts } = require("../src/artifacts");
+const { createArtifactParser, replayArtifact } = require("../src/core/artifact-parser");
+const { watchArtifacts } = require("../src/core/artifacts");
 
 function claudeUser(marker) {
   return { type: "user", sessionId: "claude-session", message: { content: marker } };
