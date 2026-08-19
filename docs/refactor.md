@@ -1,20 +1,19 @@
 # Refactor: core, drivers, surface, and jobs as plugins
 
-**Status:** ready to execute. No code has moved.
+**Status:** the layout has shipped. Steps 1–4 of §8 are done and deployed; step 5
+is the next one and is deliberately gated.
 
-Preconditions checked on 2026-08-18 22:36 EDT, against `main` at `67608e1`:
+| Step | State |
+|---|---|
+| 1. Land what was uncommitted | `67608e1` |
+| 2. Move the files | `ea14d32` — 21 files, byte-equivalent, nothing else in the commit |
+| 3. Dependency test | `cabbbaa` — `test/source-layout.test.js`, with negative fixtures |
+| 4. Per-directory `AGENTS.md` | `7a6112e` |
+| 5. Plugin runner | **not started — waiting on a job that needs it** |
+| 6. Move Tier 2 candidates out | not started |
 
-- `main` carries every branch's work; no feature branches remain.
-- The working tree is clean.
-- 162 tests pass.
-- No other process has this repository as its working directory.
-- The measurements below were re-taken on that tree and are current.
-
-**Re-check the last two before starting.** This moves every file in `src/` and
-rewrites every import path, so it cannot be merged with concurrent edits — whoever is
-mid-change loses. A first attempt was abandoned on 2026-08-18 because a second session
-was editing the tree, which is also how `driver-version.js` came to be missing from
-the original measurements.
+The layout below is therefore a description of the tree, not a proposal. Sections 5–6
+are still proposals.
 
 This is one document for a set of decisions taken together. It exists so the next
 person does not have to reconstruct the reasoning from a conversation.
