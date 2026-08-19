@@ -205,7 +205,8 @@ thing.
 | Candidate | Where it lives | Why it can move |
 |---|---|---|
 | **Workspace retention / prune** | `workspace-state.js` | Reads everything from disk — pending outputs from the I/O ledger, retained ids from the history records. Touches no in-memory session state. A filesystem janitor that happens to be called from inside a turn. |
-| **Archive age floors** | `workspace-state.js` | Pure file-age rules. No runtime state at all. |
+| **Archive file floor** (90d) | `workspace-state.js` | Pure file-age rules, no runtime state. Separable today — see spec `0012`. |
+| **Archive media floor** (30d) | `workspace-state.js` | **Not separable.** It is one `if` with the retention decision, over the same listing, under the same lock. It moves with retention, not before it — spec `0012` §2. |
 | **Operational prune** | `session-manager.js` | Keeps the newest 1,000 terminal submission records and deletes their prompt files. Housekeeping. |
 | **Auth expiry watch** | *built, outside* | Highest value of the set — see below, including what it turned out not to be able to do. |
 | **Knowledge / memory backup** | *does not exist* | Periodic, no runtime coupling. |
