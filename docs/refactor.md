@@ -1,14 +1,20 @@
 # Refactor: core, drivers, surface, and jobs as plugins
 
-**Status:** planned, not started. No code has moved. The measurements below were
-taken from the tree on 2026-08-18 and **are already stale** — `driver-version.js`
-appeared afterwards. Re-take them before starting.
+**Status:** ready to execute. No code has moved.
 
-**Before you start: check nobody else is in the tree.** This moves every file in
-`src/` and rewrites every import path, so it cannot be merged with concurrent edits;
-whoever is mid-change loses. `git status` plus a look for other processes whose
-working directory is this repository is the minimum check. A first attempt was
-abandoned on 2026-08-19 for exactly this reason.
+Preconditions checked on 2026-08-18 22:36 EDT, against `main` at `67608e1`:
+
+- `main` carries every branch's work; no feature branches remain.
+- The working tree is clean.
+- 162 tests pass.
+- No other process has this repository as its working directory.
+- The measurements below were re-taken on that tree and are current.
+
+**Re-check the last two before starting.** This moves every file in `src/` and
+rewrites every import path, so it cannot be merged with concurrent edits — whoever is
+mid-change loses. A first attempt was abandoned on 2026-08-18 because a second session
+was editing the tree, which is also how `driver-version.js` came to be missing from
+the original measurements.
 
 This is one document for a set of decisions taken together. It exists so the next
 person does not have to reconstruct the reasoning from a conversation.
@@ -90,17 +96,21 @@ main.js, config.js → anything       allowed
 
 One rule, no exceptions.
 
-### It is already almost true
+### It is already true
 
-Mapped across the 22 files in `src/`, there are **42 import edges**. Under this split
-only 17 cross a boundary, and after hoisting `main.js` to the root:
+Mapped across the **23** files in `src/`, there are **45 import edges**. With
+`main.js` and `config.js` at the root:
 
 | edge | count |
 |---|---:|
 | `surface → core` | 7 |
-| `drivers → core` | 4 |
+| `drivers → core` | 5 |
 | `core → drivers` | 1 |
 | **`core → surface`** | **0** |
+
+Re-measured after the driver-version work landed, so the property survives a change
+made by someone who had never read this document — which is the only kind of evidence
+that a boundary is real rather than maintained by hand.
 
 The single `core → drivers` edge is `session-manager → drivers`, which is legitimate.
 
@@ -127,7 +137,9 @@ needing to have read the repository root.
 
 - `notices.js` is generic but its log lines are prefixed `[telegram]`, and the
   directory it watches is handed to it by the surface. The code is clean; the strings
-  are not. One-line fix during the move.
+  are not. **Not fixed during the move** — it is a behaviour-adjacent edit, and mixing
+  one into a pure move is how a "no behaviour change" claim stops being true. Its own
+  commit, before or after.
 - Every line reference in the specs, the review documents and any external notes
   becomes stale. Cheap, but better known in advance than discovered afterwards.
 
@@ -223,19 +235,18 @@ exists, retention stays where it is.
 
 Measured, not estimated:
 
-- **23** files moved (22 at the time of measurement, plus `driver-version.js`)
-- **17** import lines to fix inside `src/`
-- **64** import lines across **19** test files
+- **21** files moved — 23 in `src/`, less `main.js` and `config.js`, which stay at the root
+- **26** import lines to fix inside `src/`
+- **68** import lines across **20** test files
 - **3** references outside `src/` — two in `package.json`, one in `bin/`
 
-≈ **84 mechanical line edits and 22 moves.** Zero behaviour change. The suite (151
-tests at time of writing) is the safety net: a wrong path fails immediately with
-`MODULE_NOT_FOUND`.
+≈ **97 mechanical line edits and 21 moves.** Zero behaviour change. The suite (162
+tests) is the safety net: a wrong path fails immediately with `MODULE_NOT_FOUND`.
 
 ## 8. Sequencing
 
-1. Land and deploy whatever is currently uncommitted. Rewriting every import path on
-   top of an unlanded diff makes both harder to reason about.
+1. ~~Land and deploy whatever is currently uncommitted.~~ **Done** — `main` is at
+   `67608e1`, the tree is clean, and no feature branches remain.
 2. Move the files. **Its own commit, containing nothing else**, because it changes no
    behaviour and that is what makes it reviewable.
 3. Add the dependency test in the same commit or immediately after. The layout without
