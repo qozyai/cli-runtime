@@ -299,3 +299,135 @@ test("Claude parser recognizes real auth failures and rejects synthetic success 
   });
   assert.equal(synthetic.terminal, false);
 });
+
+test("the parser keeps the whole tool sequence, not a tail of twenty", () => {
+  const marker = "<marker-sequence/>";
+  const parser = createArtifactParser({ driver: "codex", marker });
+  parser.feed({ type: "event_msg", payload: { type: "user_message", message: marker } });
+  let progress = null;
+  for (let index = 0; index < 30; index += 1) {
+    parser.feed({
+      type: "response_item",
+      payload: { type: "function_call", call_id: `call-${index}`, name: "exec", arguments: `step ${index}` },
+    });
+    progress = parser.feed({
+      type: "response_item",
+      payload: { type: "function_call_output", call_id: `call-${index}`, output: "ok" },
+    });
+  }
+  // The first call has to survive: truncating to the newest 20 is what made the
+  // history record a progress snapshot rather than a record.
+  assert.equal(progress.toolUses.length, 30);
+  assert.equal(progress.toolUses[0].id, "call-0");
+  assert.equal(progress.toolUses.at(-1).id, "call-29");
+  assert.deepEqual(progress.toolCounts, { successful: 30, failed: 0 });
+});
+
+test("the Claude parser also keeps the whole tool sequence", () => {
+  const marker = "<marker-claude-sequence/>";
+  const parser = createArtifactParser({ driver: "claude", marker });
+  parser.feed(claudeUser(marker));
+  let progress = null;
+  for (let index = 0; index < 30; index += 1) {
+    progress = parser.feed({
+      type: "assistant",
+      message: {
+        content: [{
+          type: "tool_use",
+          id: `toolu_${index}`,
+          name: index === 3 ? "Edit" : "Bash",
+          input: { description: `step ${index}` },
+        }],
+        stop_reason: "tool_use",
+      },
+    });
+    parser.feed({
+      type: "user",
+      message: { content: [{ type: "tool_result", tool_use_id: `toolu_${index}`, content: "ok" }] },
+    });
+  }
+  // Both drivers push into the same accumulator, so the fix has to hold for both.
+  assert.equal(progress.toolUses.length, 30);
+  assert.equal(progress.toolUses[0].id, "toolu_0");
+  assert.equal(progress.toolUses[3].tool, "Edit");
+  assert.equal(progress.toolUses.at(-1).id, "toolu_29");
+});
+
+test("the retained tool sequence is bounded, and the counts stay exact past the bound", () => {
+  const marker = "<marker-bound/>";
+  const parser = createArtifactParser({ driver: "codex", marker });
+  parser.feed({ type: "event_msg", payload: { type: "user_message", message: marker } });
+  let progress = null;
+  for (let index = 0; index < 520; index += 1) {
+    parser.feed({
+      type: "response_item",
+      payload: { type: "function_call", call_id: `call-${index}`, name: "exec", arguments: `step ${index}` },
+    });
+    progress = parser.feed({
+      type: "response_item",
+      payload: { type: "function_call_output", call_id: `call-${index}`, output: "ok" },
+    });
+  }
+  // Unbounded accumulation would let a looping provider grow this array — and the
+  // per-tick copy and serialization with it — inside the process that also serves
+  // Telegram. The ceiling is far above the busiest turn ever measured.
+  assert.equal(progress.toolUses.length, 500);
+  assert.equal(progress.toolUses.at(-1).id, "call-519");
+  // Counts are never trimmed, so a truncated sequence still reports its true size.
+  assert.deepEqual(progress.toolCounts, { successful: 520, failed: 0 });
+});
+
+// A turn that the driver ran perfectly was reported to the user as a bind timeout,
+// because Codex had renamed the one event the bind check read. Every shape Codex has
+// used for the prompt is accepted, so the same rename cannot strand a turn again.
+test("Codex binds on every rollout shape that carries the prompt", () => {
+  const marker = '<cli-runtime-submission id="fixture-codex-shapes"/>';
+  const shapes = [
+    ["legacy user_message event", {
+      type: "event_msg",
+      payload: { type: "user_message", message: `fixture ${marker}` },
+    }],
+    ["item_completed UserMessage envelope", {
+      type: "event_msg",
+      payload: {
+        type: "item_completed",
+        item: { type: "UserMessage", content: [{ type: "text", text: `fixture ${marker}`, text_elements: [] }] },
+      },
+    }],
+    ["response_item message with role user", {
+      type: "response_item",
+      payload: { type: "message", role: "user", content: [{ type: "input_text", text: `fixture ${marker}` }] },
+    }],
+  ];
+
+  for (const [label, entry] of shapes) {
+    const parser = createArtifactParser({ driver: "codex", marker });
+    parser.feed(entry);
+    assert.equal(parser.state.bound, true, `did not bind on ${label}`);
+    const result = parser.feed({
+      type: "event_msg",
+      payload: { type: "task_complete", last_agent_message: "Bound and finished." },
+    });
+    assert.equal(result.terminal, true, `did not complete after ${label}`);
+    assert.equal(result.ok, true);
+    assert.equal(result.reply, "Bound and finished.");
+  }
+});
+
+// A prompt echoed back inside an unrelated turn must not bind this one.
+test("Codex ignores prompt-shaped entries that lack this turn's marker", () => {
+  const parser = createArtifactParser({ driver: "codex", marker: "<marker-mine/>" });
+  parser.feed({
+    type: "event_msg",
+    payload: {
+      type: "item_completed",
+      item: { type: "UserMessage", content: [{ type: "text", text: "replayed <marker-theirs/>" }] },
+    },
+  });
+  parser.feed({
+    type: "response_item",
+    payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "leaked reply" }] },
+  });
+  assert.equal(parser.state.bound, false);
+  assert.equal(parser.state.lastAssistantMessage, "");
+});

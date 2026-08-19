@@ -4,7 +4,7 @@ const { createHash, timingSafeEqual } = require("node:crypto");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { request } = require("./client");
-const { readJson, sleep, writeAtomic } = require("./util");
+const { SUBMISSION_SOURCE_OWNER, readJson, sleep, writeAtomic } = require("./util");
 const { mimeTypeFor, safeFilename } = require("./progress");
 const { ProjectCatalog, validProjectName } = require("./project-catalog");
 const { OwnerStore, senderUserId, userId } = require("./owner-store");
@@ -1120,6 +1120,9 @@ class TelegramAdapter {
         message: pieces.join("\n"),
         inputs: inputs.map(({ temporary, replyContext, transcriptionError, ...input }) => ({ ...input, transcriptionError })),
         idempotencyKey: this.submissionIdempotencyKey(message),
+        // A person typed this. Stated rather than assumed, so retention measures
+        // conversation rather than whatever else reaches the same endpoint.
+        source: SUBMISSION_SOURCE_OWNER,
       });
       operation.submissionId = accepted.submission.submissionId;
       if (operation.cancelled || operation.controller.signal.aborted) {

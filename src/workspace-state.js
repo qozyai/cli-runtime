@@ -3,12 +3,22 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const { appendJsonl, nowIso, readJson, safeId, tailText, writeAtomic } = require("./util");
+const {
+  SUBMISSION_SOURCE_OWNER,
+  appendJsonl,
+  normalizeSubmissionSource,
+  nowIso,
+  readJson,
+  safeId,
+  tailText,
+  writeAtomic,
+} = require("./util");
 const {
   MAX_STATUS_CHARS,
   boundedHistoryText,
   boundedText,
   mimeTypeFor,
+  normalizeHistoryProgress,
   normalizeProgress,
   redactText,
   safeFilename,
@@ -17,6 +27,15 @@ const {
 
 const BREAK_MS = 6 * 60 * 60 * 1000;
 const WORK_WINDOW_MS = 48 * 60 * 60 * 1000;
+// Two absolute floors under the work-cluster rule. That rule only ever drops the
+// *older* clusters of a session, so a session that is abandoned stops accumulating
+// active time, never spends its budget, and keeps everything it ever archived. The
+// records are kilobytes and worth keeping; the attached media is megabytes and is
+// not. So archived input/output directories expire on age alone, and any file
+// still sitting in the tree after the outer floor goes regardless of what
+// referenced it.
+const MEDIA_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const WORKSPACE_FILE_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
 
 function parseTime(value) {
   const parsed = Date.parse(String(value || ""));
@@ -38,6 +57,25 @@ function historyUserText(message, inputDescriptors = []) {
   return parts.join("\n\n");
 }
 
+// How long ago the newest file in a directory was written. "Older than 30 days"
+// has to mean the files, not the submission: an output archived today belongs to
+// today even when the turn that produced it was accepted a month ago.
+async function newestFileAgeMs(dir, nowMs) {
+  let newest = 0;
+  const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => null);
+  if (entries === null) return 0;
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const stat = await fs.stat(path.join(dir, entry.name)).catch(() => null);
+    if (stat && stat.mtimeMs > newest) newest = stat.mtimeMs;
+  }
+  if (newest === 0) {
+    const stat = await fs.stat(dir).catch(() => null);
+    newest = stat ? stat.mtimeMs : nowMs;
+  }
+  return nowMs - newest;
+}
+
 function buildWorkClusters(turns) {
   const clusters = [];
   for (const turn of turns) {
@@ -57,21 +95,56 @@ function buildWorkClusters(turns) {
   return clusters;
 }
 
-function selectRecentTurns(turns) {
-  const valid = turns.filter((turn) => turn && typeof turn === "object"
-    && parseTime(turn.inboundAt) !== null && parseTime(turn.completedAt) !== null);
-  const clusters = buildWorkClusters(valid);
-  const selected = new Set();
+// The start of the oldest cluster still inside the 48-hour budget, or null when
+// there is nothing to measure.
+function windowBoundary(clusters) {
   let accumulatedMs = 0;
+  let boundaryMs = null;
   for (let index = clusters.length - 1; index >= 0; index -= 1) {
     const cluster = clusters[index];
-    for (const item of cluster.turns) selected.add(item.turn);
+    boundaryMs = cluster.startAtMs;
     accumulatedMs += Math.max(0, cluster.endAtMs - cluster.startAtMs);
     if (accumulatedMs >= WORK_WINDOW_MS) break;
   }
-  // Records that cannot be classified are retained rather than treated as old.
-  return turns.filter((turn) => !turn || typeof turn !== "object" || selected.has(turn)
-    || parseTime(turn.inboundAt) === null || parseTime(turn.completedAt) === null);
+  return boundaryMs;
+}
+
+function earlierBoundary(a, b) {
+  if (a === null) return b;
+  if (b === null) return a;
+  return Math.min(a, b);
+}
+
+function selectRecentTurns(turns) {
+  const valid = turns.filter((turn) => turn && typeof turn === "object"
+    && parseTime(turn.inboundAt) !== null && parseTime(turn.completedAt) !== null);
+  // The window measures how long a person worked here. A scheduled turn is the
+  // machine checking in on itself, and counting it corrupts the measurement twice:
+  // it spends budget nothing asked for, and — because any interval under six hours
+  // stops a break from ever forming — it can fuse a session into one endless
+  // cluster that the rule can no longer trim.
+  const owner = valid.filter((turn) => normalizeSubmissionSource(turn.source) === SUBMISSION_SOURCE_OWNER);
+  // A session that is only ever woken has no owner turns at all. Measuring it
+  // against nothing would retain nothing, so it keeps the original behaviour.
+  // Measured two ways and the more generous answer wins. Owner-only measurement is
+  // the point of the rule, but on its own it would delete every scheduled turn that
+  // preceded a session's first owner turn — an autonomous session losing its whole
+  // history the moment somebody speaks to it. Counting everything can only ever
+  // spend the budget faster, so the earlier of the two boundaries is always safe.
+  const boundaryMs = earlierBoundary(
+    windowBoundary(buildWorkClusters(owner)),
+    windowBoundary(buildWorkClusters(valid)),
+  );
+  // Everything from the oldest retained cluster onward is kept, whatever asked for
+  // it. Scheduled turns are still history; they simply no longer decide where the
+  // boundary falls. Records that cannot be classified are retained rather than
+  // treated as old.
+  return turns.filter((turn) => {
+    if (!turn || typeof turn !== "object") return true;
+    const startedAtMs = parseTime(turn.inboundAt);
+    if (startedAtMs === null || parseTime(turn.completedAt) === null) return true;
+    return boundaryMs === null || startedAtMs >= boundaryMs;
+  });
 }
 
 async function writeTextAtomic(filePath, text) {
@@ -136,6 +209,8 @@ class WorkspaceState {
     this.maxOutputFiles = Number(config?.workspaceMaxOutputFiles) || 20;
     this.maxOutputFileBytes = Number(config?.workspaceMaxOutputFileBytes) || 100 * 1024 * 1024;
     this.maxOutputTotalBytes = Number(config?.workspaceMaxOutputTotalBytes) || 200 * 1024 * 1024;
+    this.mediaMaxAgeMs = Number(config?.workspaceMediaMaxAgeMs) || MEDIA_MAX_AGE_MS;
+    this.fileMaxAgeMs = Number(config?.workspaceFileMaxAgeMs) || WORKSPACE_FILE_MAX_AGE_MS;
     this.workspaceLocks = new Map();
     this.pruneScheduled = new Map();
     this.initializedWorkspaces = new Set();
@@ -533,6 +608,11 @@ class WorkspaceState {
         collected.outputError = tailText(err.message || String(err), 4000);
       }
       const normalized = normalizeProgress(options.progress, options.submission.status);
+      // History keeps the full tool sequence; the reduced progress shape is only a
+      // fallback for callers that never captured a durable snapshot.
+      const durable = options.historyProgress
+        ? normalizeHistoryProgress(options.historyProgress, options.submission.status)
+        : normalized;
       const activeTurn = await readJson(this.activePath(options.workspace, options.submission.submissionId), null);
       const record = {
         version: 1,
@@ -541,6 +621,7 @@ class WorkspaceState {
         submissionId: options.submission.submissionId,
         sessionKey: options.sessionKey,
         driver: options.driver,
+        source: normalizeSubmissionSource(options.submission.source),
         providerSessionId: normalized.providerSessionId,
         status: options.submission.status,
         inboundAt: options.submission.acceptedAt,
@@ -550,8 +631,11 @@ class WorkspaceState {
           text: boundedHistoryText(activeTurn?.user?.text || options.submission.message || ""),
           inputs: options.submission.inputs || [],
         },
-        reasoning: normalized.reasoning,
-        tools: normalized.tools,
+        reasoning: durable.reasoning,
+        tools: durable.tools,
+        // Counts are exact and uncapped, so a sequence trimmed by MAX_HISTORY_TOOL_USES
+        // announces itself instead of looking complete.
+        toolCounts: durable.toolCounts,
         assistant: { text: boundedHistoryText(options.submission.reply || "") },
         failure: options.submission.error ? boundedText(options.submission.error, 20_000) : null,
         outputs: collected.outputs,
@@ -588,6 +672,46 @@ class WorkspaceState {
       }
       return updated;
     });
+  }
+
+  // The outer floor. Everything under .qozyai is state derived from conversations
+  // that ended long ago; past this age it is kept by nothing but inertia. Files go
+  // first, then any submission directory left empty by the sweep. Structural
+  // directories are left alone — ensure() recreates them, but removing them here
+  // would race a turn that is mid-flight.
+  async sweepAgedFiles(paths, nowMs) {
+    const removed = [];
+    const walk = async (dir) => {
+      const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+      for (const entry of entries) {
+        const entryPath = path.join(dir, entry.name);
+        // Never follow a link: the sweep must not delete anything outside the tree.
+        if (entry.isSymbolicLink()) continue;
+        if (entry.isDirectory()) {
+          await walk(entryPath);
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        const stat = await fs.stat(entryPath).catch(() => null);
+        if (stat && nowMs - stat.mtimeMs > this.fileMaxAgeMs) {
+          await fs.rm(entryPath, { force: true });
+          removed.push(entryPath);
+        }
+      }
+    };
+    await walk(paths.root);
+    if (removed.length) {
+      for (const root of [paths.inbox, paths.outbox, paths.historyInbox, paths.historyOutbox]) {
+        const dirs = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
+        for (const dir of dirs) {
+          if (!dir.isDirectory()) continue;
+          const entryPath = path.join(root, dir.name);
+          const rest = await fs.readdir(entryPath).catch(() => ["keep"]);
+          if (rest.length === 0) await fs.rm(entryPath, { recursive: true, force: true });
+        }
+      }
+    }
+    return removed;
   }
 
   async prune(workspace) {
@@ -656,17 +780,39 @@ class WorkspaceState {
       if (retainedEvents.length !== ioEvents.records.length) {
         await writeTextAtomic(paths.ioEvents, retainedEvents.map((record) => JSON.stringify(record)).join("\n") + (retainedEvents.length ? "\n" : ""));
       }
+      const nowMs = Date.now();
+      let expiredMedia = 0;
       for (const root of [paths.inbox, paths.outbox, paths.historyInbox, paths.historyOutbox]) {
+        // Only the archive expires on age. The staging roots hold the files of turns
+        // that may still be running, and a long-lived submission's id says nothing
+        // about how old its files are.
+        const archived = root === paths.historyInbox || root === paths.historyOutbox;
         const dirs = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
         for (const dir of dirs) {
           const entryPath = path.join(root, dir.name);
           if (dir.isDirectory()) {
-            if (!retainedIds.has(dir.name)) await fs.rm(entryPath, { recursive: true, force: true });
+            // Aged by the files themselves, not by when the submission was accepted:
+            // a turn that ran for a month can still have produced its output today.
+            const aged = archived && await newestFileAgeMs(entryPath, nowMs) > this.mediaMaxAgeMs;
+            if (!retainedIds.has(dir.name) || aged) {
+              await fs.rm(entryPath, { recursive: true, force: true });
+              if (aged) expiredMedia += 1;
+            }
             continue;
           }
           const stat = await fs.stat(entryPath).catch(() => null);
-          if (stat && Date.now() - stat.mtimeMs > 7 * 24 * 60 * 60 * 1000) await fs.rm(entryPath, { force: true });
+          if (stat && nowMs - stat.mtimeMs > 7 * 24 * 60 * 60 * 1000) await fs.rm(entryPath, { force: true });
         }
+      }
+      const expiredFiles = await this.sweepAgedFiles(paths, nowMs);
+      if (expiredMedia || expiredFiles.length) {
+        await this.eventStore?.append("workspace.aged_state_removed", {
+          workspace: path.resolve(workspace),
+          mediaDirectories: expiredMedia,
+          files: expiredFiles.length,
+          mediaMaxAgeMs: this.mediaMaxAgeMs,
+          fileMaxAgeMs: this.fileMaxAgeMs,
+        });
       }
     });
   }

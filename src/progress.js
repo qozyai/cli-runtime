@@ -4,6 +4,14 @@ const path = require("node:path");
 
 const MAX_REASONING_CHUNKS = 3;
 const MAX_TOOL_USES = 1;
+// Progress and history are separate features that share one shape. The Telegram
+// bubble only ever renders the tool running right now, so its caps stay at 1 and
+// 3; history keeps the whole sequence, because a turn's tool calls are the record
+// of what actually happened. Spec 0003 requires every tool call to survive
+// finalization, and these ceilings exist only so a runaway turn cannot grow the
+// record without bound.
+const MAX_HISTORY_TOOL_USES = 10_000;
+const MAX_HISTORY_REASONING_CHUNKS = 500;
 const MAX_REASONING_CHARS = 2000;
 const MAX_TOOL_ERROR_CHARS = 4000;
 const MAX_STATUS_CHARS = 900;
@@ -57,13 +65,20 @@ function boundedHistoryText(value, maxChars = MAX_HISTORY_MESSAGE_CHARS) {
   return `${text.slice(0, Math.max(0, maxChars - 28))}\n[history text truncated]`;
 }
 
-function normalizeProgress(progress, status = "running") {
+function normalizeProgress(progress, status = "running", limits = {}) {
+  const maxToolUses = limits.maxToolUses ?? MAX_TOOL_USES;
+  const maxReasoningChunks = limits.maxReasoningChunks ?? MAX_REASONING_CHUNKS;
   const reasoning = (Array.isArray(progress?.reasoning) ? progress.reasoning : [])
-    .slice(-MAX_REASONING_CHUNKS)
+    .slice(-maxReasoningChunks)
     .map((item) => boundedText(item, MAX_REASONING_CHARS))
     .filter(Boolean);
-  const tools = (Array.isArray(progress?.toolUses) ? progress.toolUses : [])
-    .slice(-MAX_TOOL_USES)
+  // Accept either shape. The raw parser snapshot carries `toolUses`; an already
+  // normalized one carries `tools`, and normalizing twice must not silently empty
+  // the sequence.
+  const rawTools = Array.isArray(progress?.toolUses) ? progress.toolUses
+    : Array.isArray(progress?.tools) ? progress.tools : [];
+  const tools = rawTools
+    .slice(-maxToolUses)
     .map((tool) => {
       const normalized = {
         id: tool?.id || null,
@@ -75,7 +90,7 @@ function normalizeProgress(progress, status = "running") {
       if (detail) normalized.detail = detail;
       return normalized;
     });
-  const fallbackCounts = (Array.isArray(progress?.toolUses) ? progress.toolUses : []).reduce((counts, tool) => {
+  const fallbackCounts = rawTools.reduce((counts, tool) => {
     if (tool?.success === true) counts.successful += 1;
     if (tool?.success === false) counts.failed += 1;
     return counts;
@@ -95,6 +110,16 @@ function normalizeProgress(progress, status = "running") {
     lastAssistantMessage: boundedText(progress?.lastAssistantMessage || "", 8000),
     lastError: boundedText(progress?.lastError || "", MAX_TOOL_ERROR_CHARS) || null,
   };
+}
+
+// The history writer's view of the same snapshot: identical shape, identical
+// per-entry bounds and redaction, but the sequence is kept rather than reduced to
+// what a status line can show.
+function normalizeHistoryProgress(progress, status = "running") {
+  return normalizeProgress(progress, status, {
+    maxToolUses: MAX_HISTORY_TOOL_USES,
+    maxReasoningChunks: MAX_HISTORY_REASONING_CHUNKS,
+  });
 }
 
 function summarizeProgress(progress, status = "running", normalizedProgress = null) {
@@ -122,10 +147,13 @@ function summarizeProgress(progress, status = "running", normalizedProgress = nu
 }
 
 module.exports = {
+  MAX_HISTORY_TOOL_USES,
   MAX_STATUS_CHARS,
+  MAX_TOOL_USES,
   boundedHistoryText,
   boundedText,
   mimeTypeFor,
+  normalizeHistoryProgress,
   normalizeProgress,
   redactText,
   safeFilename,

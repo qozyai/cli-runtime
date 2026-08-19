@@ -120,10 +120,27 @@ function tailText(value, maxChars = 16_000) {
   return text.length <= maxChars ? text : `[truncated ${text.length - maxChars} chars]\n${text.slice(-maxChars)}`;
 }
 
+// Provenance of a turn. The runtime cannot infer this — a scheduled turn and a
+// person typing reach the daemon as the same POST — so the caller declares it, and
+// an unlabelled submission is treated as the owner speaking. That default keeps
+// every existing caller, and every turn already on disk, meaning exactly what it
+// did. The runtime knows these two values and nothing about who sends them.
+const SUBMISSION_SOURCE_OWNER = "owner";
+const SUBMISSION_SOURCE_SCHEDULER = "scheduler";
+const SUBMISSION_SOURCES = new Set([SUBMISSION_SOURCE_OWNER, SUBMISSION_SOURCE_SCHEDULER]);
+
+function normalizeSubmissionSource(value) {
+  const source = String(value || "").trim().toLowerCase();
+  return SUBMISSION_SOURCES.has(source) ? source : SUBMISSION_SOURCE_OWNER;
+}
+
 module.exports = {
+  SUBMISSION_SOURCE_OWNER,
+  SUBMISSION_SOURCE_SCHEDULER,
   appendJsonl,
   createId,
   isolatedProcessEnv,
+  normalizeSubmissionSource,
   nowIso,
   readBody,
   readJson,

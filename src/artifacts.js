@@ -4,7 +4,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { sleepWithSignal } = require("./util");
 const { createArtifactParser, replayArtifact } = require("./artifact-parser");
-const { normalizeProgress, summarizeProgress } = require("./progress");
+const { normalizeHistoryProgress, normalizeProgress, summarizeProgress } = require("./progress");
 
 const MAX_INCREMENT_BYTES = 8 * 1024 * 1024;
 
@@ -162,6 +162,17 @@ async function watchArtifacts({
   }
 }
 
+// The durable view of a finished turn. Same fields as publicProgress, but the
+// tool sequence is kept whole because history is a record, not a status line.
+function historyProgress(progress, status = "running") {
+  if (!progress) return null;
+  const normalized = normalizeHistoryProgress(progress, status);
+  return {
+    ...normalized,
+    toolCounts: { ...normalized.toolCounts },
+  };
+}
+
 function publicProgress(progress, status = "running") {
   if (!progress) return null;
   const normalized = normalizeProgress(progress, status);
@@ -181,6 +192,7 @@ function publicProgress(progress, status = "running") {
 module.exports = {
   baselineArtifacts,
   createArtifactParser,
+  historyProgress,
   listJsonlFiles,
   publicProgress,
   replayArtifact,

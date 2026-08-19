@@ -7,6 +7,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { WorkspaceState, readJsonlLossless, selectRecentTurns } = require("../src/workspace-state");
 const { normalizeProgress, summarizeProgress } = require("../src/progress");
+const { historyProgress, publicProgress } = require("../src/artifacts");
 
 async function fixture(t, config = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-workspace-"));
@@ -267,4 +268,257 @@ test("pruning retains an old turn while any output is still pending", async (t) 
   const history = await readJsonlLossless(state.historyPath(workspace, "main"));
   assert.ok(history.records.some((record) => record.submissionId === "sub_pending_0"));
   await fs.access(finished[0].outputs[0].archivePath);
+});
+
+test("history keeps every tool call while the progress bubble keeps only the last", async (t) => {
+  const { workspace, state } = await fixture(t);
+  state.schedulePrune = () => {};
+  await begin(state, workspace, "sub_tools");
+  const toolUses = Array.from({ length: 25 }, (_, index) => ({
+    id: `call-${index}`,
+    tool: index === 7 ? "Edit" : "Bash",
+    success: index !== 7,
+    error: index === 7 ? "permission denied" : null,
+    detail: `step ${index}`,
+  }));
+  const snapshot = { toolUses, toolCounts: { successful: 24, failed: 1 }, reasoning: [] };
+  const finished = await state.finishTurn({
+    workspace,
+    sessionKey: "main",
+    driver: "codex",
+    submission: submission("sub_tools"),
+    progress: snapshot,
+    historyProgress: snapshot,
+  });
+
+  assert.equal(finished.record.tools.length, 25);
+  assert.deepEqual(finished.record.tools.map((tool) => tool.id).slice(0, 3), ["call-0", "call-1", "call-2"]);
+  assert.equal(finished.record.tools[7].success, false);
+  assert.equal(finished.record.tools[7].error, "permission denied");
+  // Counts stay exact so a sequence trimmed by the ceiling declares itself.
+  assert.deepEqual(finished.record.toolCounts, { successful: 24, failed: 1 });
+  // The bubble is unchanged: one entry, and it is the most recent call.
+  assert.deepEqual(normalizeProgress(snapshot).tools.map((tool) => tool.id), ["call-24"]);
+  assert.match(summarizeProgress(snapshot, "running"), /Last tool: Bash/);
+});
+
+test("history falls back to the reduced progress when no durable snapshot was captured", async (t) => {
+  const { workspace, state } = await fixture(t);
+  state.schedulePrune = () => {};
+  await begin(state, workspace, "sub_fallback");
+  const finished = await state.finishTurn({
+    workspace,
+    sessionKey: "main",
+    driver: "codex",
+    submission: submission("sub_fallback"),
+    progress: { toolUses: [{ id: "only", tool: "Bash", success: true }], toolCounts: { successful: 4, failed: 0 } },
+  });
+  assert.deepEqual(finished.record.tools.map((tool) => tool.id), ["only"]);
+  assert.deepEqual(finished.record.toolCounts, { successful: 4, failed: 0 });
+});
+
+test("archived media expires on age even while its turn is still retained", async (t) => {
+  const { root, workspace, state } = await fixture(t, { workspaceMediaMaxAgeMs: 1 });
+  state.schedulePrune = () => {};
+  const source = path.join(root, "voice.ogg");
+  await fs.writeFile(source, "audio");
+  await begin(state, workspace, "sub_media", [{ sourcePath: source, name: "voice.ogg", mimeType: "audio/ogg" }]);
+  await state.finishTurn({
+    workspace,
+    sessionKey: "main",
+    driver: "codex",
+    submission: submission("sub_media"),
+    progress: null,
+  });
+  const paths = state.paths(workspace);
+  assert.ok(await fs.stat(path.join(paths.historyInbox, "sub_media")).catch(() => null), "archive exists before prune");
+
+  await state.prune(workspace);
+
+  assert.equal(await fs.stat(path.join(paths.historyInbox, "sub_media")).catch(() => null), null);
+  // The turn itself is untouched: the record is what carries the conversation.
+  const history = await readJsonlLossless(state.historyPath(workspace, "main"));
+  assert.deepEqual(history.records.map((record) => record.submissionId), ["sub_media"]);
+});
+
+test("the outer floor removes any aged file and keeps the structure", async (t) => {
+  const { workspace, state } = await fixture(t);
+  state.schedulePrune = () => {};
+  await begin(state, workspace, "sub_floor");
+  await state.finishTurn({
+    workspace,
+    sessionKey: "main",
+    driver: "codex",
+    submission: submission("sub_floor"),
+    progress: null,
+  });
+  const paths = state.paths(workspace);
+  const stale = path.join(paths.historyOutbox, "sub_floor", "stale.txt");
+  await fs.mkdir(path.dirname(stale), { recursive: true });
+  await fs.writeFile(stale, "old");
+  const fresh = path.join(paths.history, "keep.jsonl");
+  await fs.writeFile(fresh, "{}\n");
+  const old = new Date(Date.now() - 100 * 24 * 60 * 60 * 1000);
+  await fs.utimes(stale, old, old);
+
+  await state.prune(workspace);
+
+  assert.equal(await fs.stat(stale).catch(() => null), null, "aged file removed");
+  assert.ok(await fs.stat(fresh).catch(() => null), "recent file kept");
+  assert.ok((await fs.stat(paths.historyOutbox)).isDirectory(), "structure kept");
+});
+
+test("a scheduled storm cannot evict the conversation it interrupted", () => {
+  const turn = (id, start, hours, source) => ({
+    submissionId: id,
+    source,
+    inboundAt: new Date(start).toISOString(),
+    completedAt: new Date(new Date(start).getTime() + hours * 3600_000).toISOString(),
+  });
+  const turns = [
+    turn("owner-old", "2026-07-01T00:00:00Z", 1, "owner"),
+    // Three days of wakes with no six-hour break anywhere in them.
+    turn("wake-a", "2026-07-10T00:00:00Z", 24, "scheduler"),
+    turn("wake-b", "2026-07-11T00:00:00Z", 24, "scheduler"),
+    turn("wake-c", "2026-07-12T00:00:00Z", 24, "scheduler"),
+    turn("owner-new", "2026-07-13T00:00:00Z", 1, "owner"),
+  ];
+  const retained = selectRecentTurns(turns).map((item) => item.submissionId);
+  // Counting the wakes would make one 73-hour cluster, spend the whole budget on
+  // it, and drop the older conversation. Counting only the owner keeps 2 hours.
+  assert.ok(retained.includes("owner-old"), "older conversation survives the storm");
+  // The wakes are still history: they simply no longer decide where the line falls.
+  assert.deepEqual(retained, ["owner-old", "wake-a", "wake-b", "wake-c", "owner-new"]);
+});
+
+test("a session that is only ever woken still measures its own work", () => {
+  const turn = (id, start, hours) => ({
+    submissionId: id,
+    source: "scheduler",
+    inboundAt: new Date(start).toISOString(),
+    completedAt: new Date(new Date(start).getTime() + hours * 3600_000).toISOString(),
+  });
+  const turns = [
+    turn("old", "2026-07-01T00:00:00Z", 4),
+    turn("recent-a", "2026-07-10T00:00:00Z", 30),
+    turn("recent-b", "2026-07-11T06:00:00Z", 30),
+  ];
+  // With no owner turns there is nothing else to measure, so the original rule
+  // applies rather than retaining everything for ever.
+  assert.deepEqual(selectRecentTurns(turns).map((item) => item.submissionId), ["recent-a", "recent-b"]);
+});
+
+test("an unlabelled turn counts as the owner speaking", () => {
+  const turn = (id, start, hours, source) => ({
+    submissionId: id,
+    ...(source ? { source } : {}),
+    inboundAt: new Date(start).toISOString(),
+    completedAt: new Date(new Date(start).getTime() + hours * 3600_000).toISOString(),
+  });
+  const turns = [
+    turn("legacy-old", "2026-07-01T00:00:00Z", 30),
+    turn("legacy-new-a", "2026-07-10T00:00:00Z", 30),
+    turn("legacy-new-b", "2026-07-11T06:00:00Z", 30),
+  ];
+  // Every record written before this field existed has to keep meaning what it did.
+  assert.deepEqual(
+    selectRecentTurns(turns).map((item) => item.submissionId),
+    ["legacy-new-a", "legacy-new-b"],
+  );
+});
+
+test("the turn record carries who asked for it", async (t) => {
+  const { workspace, state } = await fixture(t);
+  state.schedulePrune = () => {};
+  await begin(state, workspace, "sub_owner");
+  const owner = await state.finishTurn({
+    workspace,
+    sessionKey: "main",
+    driver: "claude",
+    submission: submission("sub_owner"),
+    progress: null,
+  });
+  assert.equal(owner.record.source, "owner");
+
+  await begin(state, workspace, "sub_wake");
+  const woken = await state.finishTurn({
+    workspace,
+    sessionKey: "main",
+    driver: "codex",
+    submission: { ...submission("sub_wake"), source: "scheduler" },
+    progress: null,
+  });
+  assert.equal(woken.record.source, "scheduler");
+});
+
+test("the history snapshot survives the handoff the session manager actually makes", async (t) => {
+  const { workspace, state } = await fixture(t);
+  state.schedulePrune = () => {};
+  await begin(state, workspace, "sub_handoff");
+  const raw = {
+    toolUses: [
+      { id: "call-1", tool: "Bash", success: true, detail: "npm test" },
+      { id: "call-2", tool: "Edit", success: false, error: "permission denied" },
+    ],
+    toolCounts: { successful: 1, failed: 1 },
+    reasoning: [],
+  };
+  // This is the composed path: the session manager normalizes for history, then the
+  // writer receives that object. Normalizing an already-normalized snapshot used to
+  // empty it, so the record kept nonzero counts and no tools at all.
+  const finished = await state.finishTurn({
+    workspace,
+    sessionKey: "main",
+    driver: "claude",
+    submission: submission("sub_handoff"),
+    progress: publicProgress(raw),
+    historyProgress: historyProgress(raw),
+  });
+  assert.equal(finished.record.tools.length, 2);
+  assert.deepEqual(finished.record.tools.map((tool) => tool.id), ["call-1", "call-2"]);
+  assert.deepEqual(finished.record.toolCounts, { successful: 1, failed: 1 });
+});
+
+test("a session's first owner turn does not delete the scheduled history before it", () => {
+  const turn = (id, start, hours, source) => ({
+    submissionId: id,
+    source,
+    inboundAt: new Date(start).toISOString(),
+    completedAt: new Date(new Date(start).getTime() + hours * 3600_000).toISOString(),
+  });
+  const scheduled = [
+    turn("wake-1", "2026-07-01T00:00:00Z", 1, "scheduler"),
+    turn("wake-2", "2026-07-02T00:00:00Z", 1, "scheduler"),
+  ];
+  // While nobody has spoken, the session measures itself and keeps everything.
+  assert.deepEqual(selectRecentTurns(scheduled).map((t) => t.submissionId), ["wake-1", "wake-2"]);
+  // The moment an owner turn appears, an owner-only boundary would sit after both
+  // wakes and delete them — two hours of history lost to one minute of conversation.
+  const withOwner = [...scheduled, turn("owner", "2026-07-03T00:00:00Z", 0.02, "owner")];
+  assert.deepEqual(
+    selectRecentTurns(withOwner).map((t) => t.submissionId),
+    ["wake-1", "wake-2", "owner"],
+  );
+});
+
+test("a freshly archived output is not pruned because its submission is old", async (t) => {
+  const { root, workspace, state } = await fixture(t, { workspaceMediaMaxAgeMs: 30 * 24 * 60 * 60 * 1000 });
+  state.schedulePrune = () => {};
+  const source = path.join(root, "voice.ogg");
+  await fs.writeFile(source, "audio");
+  // The id says this turn was accepted long ago; the files were written just now.
+  const id = "sub_20260101T000000000Z_old";
+  await begin(state, workspace, id, [{ sourcePath: source, name: "voice.ogg", mimeType: "audio/ogg" }]);
+  const record = submission(id);
+  record.acceptedAt = "2026-01-01T00:00:00.000Z";
+  record.completedAt = new Date().toISOString();
+  await state.finishTurn({ workspace, sessionKey: "main", driver: "codex", submission: record, progress: null });
+
+  await state.prune(workspace);
+
+  const paths = state.paths(workspace);
+  assert.ok(
+    await fs.stat(path.join(paths.historyInbox, id)).catch(() => null),
+    "age is a property of the files, not of when the submission was accepted",
+  );
 });

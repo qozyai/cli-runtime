@@ -2,7 +2,36 @@
 
 ## Status
 
-Planned on 2026-08-05. Not implemented.
+Planned on 2026-08-05. Partially implemented on 2026-08-18.
+
+**Landed.** Parser requirement 4 for tool calls only: the artifact parser no longer
+truncates its tool sequence to the latest 20, and finalization no longer records
+whatever the Telegram progress bubble happened to need. Progress normalization is
+now parameterized, `normalizeHistoryProgress` keeps the whole sequence under the
+existing per-entry bounds and redaction, and the finished turn record carries
+`tools` in full plus exact `toolCounts`. The progress API is unchanged: the bubble
+still renders one tool and three reasoning chunks.
+
+**Still open.** Everything that makes this version 2: ordered `blocks` with
+`seq`, the `tool_call` / `tool_result` split with correlated `callId`, 4 KiB
+redacted arguments, 16 KiB failed-result output, commentary and reasoning blocks in
+observation order, the append-only active journal with a durable cursor, crash
+resume, provider-specific deduplication backed by fixtures, and version-1/version-2
+coexistence. Records are still version 1 and still carry the compatibility
+projection fields rather than `blocks`.
+
+The interim keeps `callId` on every entry so results can be correlated to calls when
+the block sequence lands, rather than needing the shape rebuilt.
+
+**Not durable across a restart.** The full sequence lives only in the parser's
+accumulator until finalization, deliberately not on the submission record. The
+completion path and the last progress tick both carry it, so an ordinary failure or
+interruption keeps it — but a forced session close and daemon-start recovery
+finalize without it and retain only the single progress-shaped entry. That is the
+gap the append-only journal in this spec closes, and it is the main reason the rest
+of the spec still matters. The accumulator is bounded at 500 entries per turn so an
+unbounded provider cannot grow the process that also serves Telegram; `toolCounts`
+stays exact, so a sequence that reaches the ceiling still reports its true size.
 
 This specification replaces the lossy progress-shaped turn history with an
 ordered semantic record of what the user, model, and tools did. It does not

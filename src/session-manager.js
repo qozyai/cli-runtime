@@ -12,8 +12,19 @@ const {
   normalizeDriver,
   recentScreen,
 } = require("./drivers");
-const { baselineArtifacts, publicProgress, watchArtifacts } = require("./artifacts");
-const { createId, nowIso, readJson, safeId, sleep, sleepWithSignal, tailText, writeAtomic } = require("./util");
+const { baselineArtifacts, historyProgress, publicProgress, watchArtifacts } = require("./artifacts");
+const {
+  SUBMISSION_SOURCE_OWNER,
+  createId,
+  normalizeSubmissionSource,
+  nowIso,
+  readJson,
+  safeId,
+  sleep,
+  sleepWithSignal,
+  tailText,
+  writeAtomic,
+} = require("./util");
 const { WorkspaceState } = require("./workspace-state");
 
 const PROMPT_PASTE_SETTLE_MS = 150;
@@ -234,9 +245,12 @@ class SessionManager {
     await writeAtomic(this.submissionPath(submission.submissionId), submission);
   }
 
-  async finalizeSubmission(session, submission, fields) {
+  async finalizeSubmission(session, submission, fields, { history = null } = {}) {
     const finalized = { ...submission, ...fields };
-    await this.finishWorkspaceTurn(session, finalized);
+    // The durable snapshot is handed to the history writer directly rather than
+    // stored on the submission: the submission record is the operational view and
+    // keeps the reduced progress shape.
+    await this.finishWorkspaceTurn(session, finalized, history);
     await this.persistSubmission(finalized);
     Object.assign(submission, finalized);
   }
@@ -509,7 +523,7 @@ class SessionManager {
     return publicSession(session);
   }
 
-  async submit(sessionKey, { message, inputs = [], idempotencyKey = null, timeoutMs = null } = {}) {
+  async submit(sessionKey, { message, inputs = [], idempotencyKey = null, timeoutMs = null, source = null } = {}) {
     const prompt = String(message || "").trim();
     const inputDescriptors = Array.isArray(inputs) ? inputs : [];
     if (!prompt && inputDescriptors.length === 0) throw new Error("message or input file required");
@@ -518,6 +532,7 @@ class SessionManager {
       prompt,
       idempotency,
       timeoutMs,
+      source: normalizeSubmissionSource(source),
     }));
     if (admitted.prior) return admitted.prior;
     const { session, submission, activeRuntime } = admitted;
@@ -582,7 +597,7 @@ class SessionManager {
     }
   }
 
-  async admitSubmission(sessionKey, { prompt, idempotency, timeoutMs }) {
+  async admitSubmission(sessionKey, { prompt, idempotency, timeoutMs, source = SUBMISSION_SOURCE_OWNER }) {
     const session = this.rawSession(sessionKey);
     if (idempotency && session.idempotency?.[idempotency]) {
       const prior = await this.getSubmission(session.idempotency[idempotency]);
@@ -613,6 +628,10 @@ class SessionManager {
       status: "accepted",
       driver: session.driver,
       workspace: session.workspace,
+      // Who asked for this turn. Retention treats a scheduled turn as machine
+      // activity rather than as a person working, and the same field tells a
+      // memory pass which turns were authored by the owner.
+      source,
       message: prompt,
       inputs: [],
       outputs: [],
@@ -847,6 +866,10 @@ class SessionManager {
         },
         onProgress: async (progress) => {
           submission.progress = publicProgress(progress);
+          // A turn that fails or is interrupted never reaches the completion path,
+          // and those are the turns whose tool sequence is worth the most. Keep the
+          // last durable snapshot so history is not reduced to the final tool.
+          activeRuntime.history = historyProgress(progress, "running");
           await this.updateWorkspaceTurn({
             workspace: session.workspace,
             sessionKey: session.sessionKey,
@@ -908,6 +931,7 @@ class SessionManager {
         throw Object.assign(new Error("submission interrupted"), { code: "SUBMISSION_INTERRUPTED" });
       }
       const progress = publicProgress(result);
+      const history = historyProgress(result);
       const reply = tailText(result.reply || "", 200_000);
       const error = result.ok ? null : tailText(result.error || "driver turn failed", 20_000);
       const status = result.ok ? "completed" : "failed";
@@ -923,7 +947,7 @@ class SessionManager {
         completedAt: nowIso(),
         artifactPath,
         artifactEndOffset,
-      });
+      }, { history });
       this.active.delete(session.sessionKey);
       session.status = result.kind === "auth_required" ? "auth_required" : "ready";
       session.lastReply = reply || null;
@@ -959,7 +983,7 @@ class SessionManager {
         completedAt: nowIso(),
         artifactPath: submission.artifactPath || submission.progress?.artifactPath || null,
         artifactEndOffset: submission.progress?.throughOffset || null,
-      });
+      }, { history: activeRuntime.history || null });
       this.active.delete(session.sessionKey);
       if (timedOut) {
         this.note("submission.timed_out", {
@@ -1028,7 +1052,7 @@ class SessionManager {
     }
   }
 
-  async finishWorkspaceTurn(session, submission) {
+  async finishWorkspaceTurn(session, submission, history = null) {
     try {
       const finished = await this.workspaceState.finishTurn({
         workspace: session.workspace,
@@ -1036,6 +1060,7 @@ class SessionManager {
         submission,
         driver: session.driver,
         progress: submission.progress,
+        historyProgress: history,
       });
       if (finished.reused) {
         const record = finished.record;
@@ -1046,7 +1071,7 @@ class SessionManager {
         submission.progress = {
           providerSessionId: record.providerSessionId || null,
           reasoning: Array.isArray(record.reasoning) ? record.reasoning : [],
-          toolUses: (Array.isArray(record.tools) ? record.tools : []).map((tool) => ({
+          toolUses: (Array.isArray(record.tools) ? record.tools : []).slice(-1).map((tool) => ({
             id: tool.id,
             tool: tool.tool,
             success: tool.success,

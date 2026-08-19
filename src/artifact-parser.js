@@ -20,6 +20,22 @@ function claudeAssistantText(entry) {
   return blocks.filter((item) => item?.type === "text").map((item) => String(item.text || "")).join("\n").trim();
 }
 
+// Codex renamed the rollout event that carries the prompt: the flat `user_message`
+// event became an `item_completed` envelope around a `UserMessage` item, and the same
+// text also lands as a response_item with role "user". Bind reads every shape, because
+// a rename on either side otherwise strands turns the driver ran perfectly well.
+function codexUserText(entry) {
+  const payload = entry?.payload || {};
+  if (entry?.type === "event_msg") {
+    if (payload.type === "user_message") return String(payload.message || "").trim();
+    if (payload.item?.type === "UserMessage") return contentText(payload.item.content);
+  }
+  if (entry?.type === "response_item" && payload.type === "message" && payload.role === "user") {
+    return contentText(payload.content);
+  }
+  return "";
+}
+
 function codexAssistantText(entry) {
   if (entry?.type !== "response_item" || entry?.payload?.type !== "message" || entry?.payload?.role !== "assistant") return "";
   return (Array.isArray(entry.payload.content) ? entry.payload.content : [])
@@ -121,6 +137,8 @@ function toolDetail(name, value) {
   return "";
 }
 
+const MAX_RETAINED_TOOL_USES = 500;
+
 function createArtifactParser({ driver, marker }) {
   if (!new Set(["claude", "codex"]).has(driver)) throw new Error(`unsupported artifact driver: ${driver}`);
   const state = {
@@ -140,6 +158,16 @@ function createArtifactParser({ driver, marker }) {
     if (state.reasoning.length > 20) state.reasoning.splice(0, state.reasoning.length - 20);
   }
 
+    // Bounded so a provider that loops cannot grow this array, and the per-tick copy
+  // and serialization stay bounded with it. Well above the busiest real turn
+  // measured (404 calls, p99 149); `toolCounts` stays exact, so a sequence that
+  // does hit the ceiling still reports its true size.
+  function boundToolUses(state) {
+    if (state.toolUses.length >= MAX_RETAINED_TOOL_USES) {
+      state.toolUses.splice(0, state.toolUses.length - MAX_RETAINED_TOOL_USES + 1);
+    }
+  }
+
   function findTool(id) {
     for (let index = state.toolUses.length - 1; index >= 0; index -= 1) {
       if (state.toolUses[index].id === id) return state.toolUses[index];
@@ -153,7 +181,10 @@ function createArtifactParser({ driver, marker }) {
       lastAssistantMessage: state.lastAssistantMessage,
       lastError: state.lastError,
       reasoning: state.reasoning.slice(-20),
-      toolUses: state.toolUses.slice(-20),
+      // The whole retained sequence, not a tail of twenty. Consumers reduce it: the
+      // Telegram bubble keeps the last entry, history keeps all of them. Capping at
+      // twenty made the display's need silently decide what was durably recorded.
+      toolUses: [...state.toolUses],
       toolCounts: { ...state.toolCounts },
     };
   }
@@ -201,6 +232,7 @@ function createArtifactParser({ driver, marker }) {
     for (const block of blocks) {
       if (block?.type === "thinking") addReasoning(block.thinking);
       if (block?.type === "tool_use") {
+        boundToolUses(state);
         state.toolUses.push({
           id: block.id || null,
           tool: String(block.name || "unknown"),
@@ -242,9 +274,7 @@ function createArtifactParser({ driver, marker }) {
       const id = String(entry?.payload?.id || "").trim();
       if (id) state.providerSessionId = id;
     }
-    if (!state.bound && entry?.type === "event_msg" && entry?.payload?.type === "user_message") {
-      if (String(entry.payload.message || "").includes(marker)) state.bound = true;
-    }
+    if (!state.bound && codexUserText(entry).includes(marker)) state.bound = true;
     if (!state.bound) return null;
 
     addReasoning(codexReasoningText(entry));
@@ -252,6 +282,7 @@ function createArtifactParser({ driver, marker }) {
     if (assistant) state.lastAssistantMessage = assistant;
     const payload = entry?.payload || {};
     if (entry?.type === "response_item" && ["function_call", "custom_tool_call"].includes(payload.type)) {
+      boundToolUses(state);
       state.toolUses.push({
         id: payload.call_id || payload.id || null,
         tool: String(payload.name || "unknown"),
