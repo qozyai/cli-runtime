@@ -207,7 +207,7 @@ thing.
 | **Workspace retention / prune** | `workspace-state.js` | Reads everything from disk — pending outputs from the I/O ledger, retained ids from the history records. Touches no in-memory session state. A filesystem janitor that happens to be called from inside a turn. |
 | **Archive file floor** (90d) | `workspace-state.js` | Pure file-age rules, no runtime state. Separable today — see spec `0012`. |
 | **Archive media floor** (30d) | `workspace-state.js` | **Not separable.** It is one `if` with the retention decision, over the same listing, under the same lock. It moves with retention, not before it — spec `0012` §2. |
-| **Operational prune** | `session-manager.js` | Keeps the newest 1,000 terminal submission records and deletes their prompt files. Housekeeping. |
+| **Operational prune** | `session-manager.js` | Separable — it reads no in-memory state. But moving it would be the *third* plugin reaching into runtime state, and three is a capability nobody admitted to designing. Blocked on a decision, spec `0013` §3. |
 | **Auth expiry watch** | *built, outside* | Highest value of the set — see below, including what it turned out not to be able to do. |
 | **Knowledge / memory backup** | *does not exist* | Periodic, no runtime coupling. |
 | **Health digest** | *does not exist* | What ran, what failed, what is stuck. |
