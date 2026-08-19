@@ -42,6 +42,27 @@ socket API and the notice spool, and nothing else. Schedulers, memory passes,
 janitors, deployment, and text-to-speech are all built this way and must stay that
 way.
 
+## A third seam, recorded rather than assumed
+
+Guarantee 8 names two interfaces: the socket in, the notice spool out. Memory
+consolidation needs a third — it reads normalized turn history from
+`<workspace>/.qozyai/history`, because that is where the record of what happened
+lives and there is no socket API that returns it.
+
+That read is hereby **sanctioned and read-only**, and the cost is stated rather than
+discovered later: **the shape of a history record is now an external contract.**
+Changing it is a core change under the rule below, exactly as if something inside
+`src/` depended on it. Nothing outside may write there.
+
+It is one seam, named, with one consumer. It is not a licence for a plugin to read
+whatever else it finds under a state directory — that remains forbidden, and the
+plugin runner deliberately has no capability that grants it.
+
+The alternative was a socket API returning history, which is a larger core change
+made to avoid admitting a dependency that already exists: memory has read those files
+since before it was scheduled. Writing it down is the honest option; pretending the
+boundary holds is not.
+
 ## You are touching the core if
 
 - your diff is in `src/` and is not adding or widening a documented seam;

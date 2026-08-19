@@ -9,8 +9,13 @@ is the next one and is deliberately gated.
 | 2. Move the files | `ea14d32` — 21 files, byte-equivalent, nothing else in the commit |
 | 3. Dependency test | `cabbbaa` — `test/source-layout.test.js`, with negative fixtures |
 | 4. Per-directory `AGENTS.md` | `7a6112e` |
-| 5. Plugin runner | **not started — waiting on a job that needs it** |
-| 6. Move Tier 2 candidates out | not started |
+| 5. Plugin runner | **done** — built in the private `qozyai/plugins` repo, with four plugins |
+| 6. Move Tier 2 candidates out | started: the auth watch is built; nothing has left `src/` yet |
+
+The runner lives outside this repository, at `/code/qozyai/plugins`, with its own
+`AGENTS.md`. On this machine it runs as one user unit with the queue janitor active;
+memory consolidation, the auth watch and wake are installed but disabled, each for a
+reason recorded in its own README.
 
 The layout below is therefore a description of the tree, not a proposal. Sections 5–6
 are still proposals.
@@ -189,9 +194,9 @@ thing.
 
 | Plugin | Kind | Notes |
 |---|---|---|
-| scheduler / wake | `daemon` | Exists. Today a hand-written service unit. |
-| memory consolidation | `periodic` | Exists as a manual command. |
-| queue-record janitor | `periodic` | Designed, not built. Every minute. |
+| scheduler / wake | `daemon` | **Built.** Rewritten around a durable occurrence record; manifest ships disabled until an explicit cutover from `qozyai-wake.service`. |
+| memory consolidation | `periodic` | **Built** as a manifest only; disabled, because a dry run shows the first run would consolidate 2026-08-03 rather than yesterday. |
+| queue-record janitor | `periodic` | **Built and running.** Every minute. |
 | speech | — | Not a job. Runs inline during a turn; stays a plain skill. |
 | deployment | — | Not a job. One-shot, must outlive the runtime restart. |
 
@@ -202,16 +207,22 @@ thing.
 | **Workspace retention / prune** | `workspace-state.js` | Reads everything from disk — pending outputs from the I/O ledger, retained ids from the history records. Touches no in-memory session state. A filesystem janitor that happens to be called from inside a turn. |
 | **Archive age floors** | `workspace-state.js` | Pure file-age rules. No runtime state at all. |
 | **Operational prune** | `session-manager.js` | Keeps the newest 1,000 terminal submission records and deletes their prompt files. Housekeeping. |
-| **Auth expiry watch** | *does not exist* | Highest value of the set — see below. |
+| **Auth expiry watch** | *built, outside* | Highest value of the set — see below, including what it turned out not to be able to do. |
 | **Knowledge / memory backup** | *does not exist* | Periodic, no runtime coupling. |
 | **Health digest** | *does not exist* | What ran, what failed, what is stuck. |
 
-**Build the auth expiry watch first.** A periodic job that asks whether each driver's
-credentials are still valid and warns *before* they expire. Credentials expiring with
-a broken repair path is a failure mode that has silently killed a production agent for
-weeks at a time; a job that says "auth expires in two days" turns that into a
-two-minute fix. It needs no new runtime code — `auth-manager.js` already exposes
-status.
+**Build the auth expiry watch first.** Done, and it needs no new runtime code:
+`GET /v1/auth/<driver>/status` is a sanctioned seam and the plugin uses nothing else.
+
+**But it cannot warn before expiry, and this document was wrong to promise it.** That
+endpoint returns `{driver, state, authenticated, method, email}` and no expiry time,
+because the driver CLIs underneath it do not report one. "Auth expires in two days"
+would need a seam that does not exist.
+
+What is buildable is a watch on the *transition*, announced once when it happens and
+once when it is repaired. The failure this exists for is credentials expiring with a
+broken repair path and nobody noticing — which has silently killed a production agent
+for weeks at a time. Minutes instead of weeks is the win that was actually available.
 
 **Cost of moving retention out.** `prune()` runs under an in-process lock. An external
 plugin cannot take that lock, so the two could race — the runtime appending a turn
