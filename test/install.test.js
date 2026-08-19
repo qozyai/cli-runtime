@@ -94,4 +94,23 @@ test("installer clones, protects configuration, and reruns idempotently", async 
   assert.doesNotMatch(`${second.stdout}\n${second.stderr}`, new RegExp(token));
   const { stdout: dirty } = await execFileAsync("git", ["-C", installDir, "status", "--porcelain"]);
   assert.equal(dirty, "");
+
+  // A release is validated against exact driver builds, and this file is rebuilt from
+  // scratch on every run. A pin the installer does not carry through would be erased by
+  // the next upgrade, silently un-pinning the deployment the pin exists to protect.
+  await fs.appendFile(envPath, [
+    "CLI_RUNTIME_CLAUDE_VERSION=2.1.231",
+    "CLI_RUNTIME_CODEX_VERSION=0.147.0",
+    "CLI_RUNTIME_DRIVER_VERSION_ENFORCE=block",
+    "",
+  ].join("\n"));
+  const third = await runInstaller(path.join(project, "install.sh"), "\n".repeat(8), env);
+  assert.equal(third.code, 0, third.stderr);
+  const { stdout: pins } = await execFileAsync("bash", [
+    "-c",
+    'source "$1"; printf "%s\\n%s\\n%s\\n" "$CLI_RUNTIME_CLAUDE_VERSION" "$CLI_RUNTIME_CODEX_VERSION" "$CLI_RUNTIME_DRIVER_VERSION_ENFORCE"',
+    "installer-test",
+    envPath,
+  ]);
+  assert.equal(pins, "2.1.231\n0.147.0\nblock\n");
 });

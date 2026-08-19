@@ -141,6 +141,23 @@ function artifactRoot(config, driver) {
     : path.join(selected.homeDir, ".codex", "sessions");
 }
 
+// Both drivers print a bare semver in their own wrapper text: Codex as
+// "codex-cli 0.147.0", Claude as "2.1.231 (Claude Code)". The first semver-shaped
+// token is the version in both, and neither has ever printed one before it.
+function parseDriverVersion(output) {
+  const match = String(output || "").match(/\b(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\b/);
+  return match ? match[1] : null;
+}
+
+function versionCommand(config, driver) {
+  const selected = driverConfig(config, driver);
+  return {
+    command: selected.command,
+    args: ["--version"],
+    env: { HOME: selected.homeDir, DISABLE_AUTOUPDATER: "1" },
+  };
+}
+
 function authCommand(config, driver) {
   const selected = driverConfig(config, driver);
   return driver === "claude"
@@ -160,5 +177,7 @@ module.exports = {
   isReady,
   isStartupAuthScreen,
   normalizeDriver,
+  parseDriverVersion,
   recentScreen,
+  versionCommand,
 };

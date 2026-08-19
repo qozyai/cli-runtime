@@ -17,6 +17,7 @@ const { sleep } = require("./util");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { replayArtifact } = require("./artifacts");
+const { blockingVersionFailures, describeVersionCheck, verifyDriverVersions } = require("./driver-version");
 
 async function createRuntime(config = loadConfig()) {
   const ownershipLock = await acquireRuntimeLock(config.stateDir);
@@ -154,6 +155,31 @@ function installRejectionBackstop(mode) {
   });
 }
 
+// Reported at start, where an operator reads it, rather than per turn, and before the
+// session manager runs: a pin that stops the daemon must stop it before init finalizes
+// interrupted turns and reconciles panes.
+//
+// Scope is narrower than the wording suggests unless it is said out loud. This probes
+// the configured command, which decides what a *newly launched* pane will run. Panes
+// already resident keep the binary they started with — reconcileRuntimePanes only kills
+// panes no live session claims — so a restart can report a pin that turns do not use.
+async function reportDriverVersions(config) {
+  const results = await verifyDriverVersions(config);
+  for (const result of results) process.stderr.write(`${describeVersionCheck(result)}\n`);
+  if (results.some((result) => result.expected)) {
+    process.stderr.write("[cli-runtime] version checks cover newly launched sessions;"
+      + " resident panes keep the binary they started with\n");
+  }
+  const blocking = blockingVersionFailures(config, results);
+  if (blocking.length > 0) {
+    const detail = blocking
+      .map((r) => `${r.driver} pinned ${r.expected}, found ${r.actual || "unreadable"}`)
+      .join("; ");
+    throw new Error(`driver version pin unsatisfied: ${detail}`);
+  }
+  return results;
+}
+
 async function runService(mode) {
   installRejectionBackstop(mode);
   if (mode === "telegram") {
@@ -177,7 +203,9 @@ async function runService(mode) {
     }
     return;
   }
-  const runtime = await createRuntime();
+  const config = loadConfig();
+  await reportDriverVersions(config);
+  const runtime = await createRuntime(config);
   const started = await runtime.server.start();
   process.stderr.write(`[cli-runtime] listening on ${started.socketPath}\n`);
   const stop = async () => { await runtime.server.stop(); process.exit(); };
@@ -202,4 +230,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createRuntime, installRejectionBackstop, main, parseSendArguments, runClient, waitForSubmission };
+module.exports = { createRuntime, installRejectionBackstop, main, parseSendArguments, reportDriverVersions, runClient, waitForSubmission };

@@ -32,6 +32,18 @@ function configError(message) {
   return error;
 }
 
+// A safety switch that silently downgrades is worse than no switch: "blok" or "BLOCK"
+// would read as enforcement while permitting the drift it was set to stop.
+function driverVersionEnforce(env) {
+  const key = "CLI_RUNTIME_DRIVER_VERSION_ENFORCE";
+  const value = String(env[key] || "").trim();
+  if (!value) return "warn";
+  if (value !== "warn" && value !== "block") {
+    throw configError(`${key} must be "warn" or "block"`);
+  }
+  return value;
+}
+
 function telegramOwnerEnrollmentCodeHash(env) {
   const key = "CLI_RUNTIME_TELEGRAM_OWNER_ENROLLMENT_CODE_HASH";
   const value = String(env[key] || "").trim().toLowerCase();
@@ -104,6 +116,9 @@ function loadConfig(env = process.env, { requireTelegramProjectsRoot = false } =
     submissionInactivityMs: nonNegativeNumber(env.CLI_RUNTIME_SUBMISSION_INACTIVITY_MS, 30 * 60_000),
     timeoutSettleMs: positiveNumber(env.CLI_RUNTIME_TIMEOUT_SETTLE_MS, 5000),
     artifactPollMs: positiveNumber(env.CLI_RUNTIME_ARTIFACT_POLL_MS, 150),
+    // A pinned driver that drifts is reported, not silently tolerated. Blocking is
+    // opt-in: a patch bump that breaks nothing should not take the bot off the air.
+    driverVersionEnforce: driverVersionEnforce(env),
     navigator: {
       url: String(env.CLI_RUNTIME_NAVIGATOR_URL || "").trim(),
       apiKey: String(env.CLI_RUNTIME_NAVIGATOR_API_KEY || "").trim(),
@@ -120,6 +135,7 @@ function loadConfig(env = process.env, { requireTelegramProjectsRoot = false } =
     drivers: {
       claude: {
         command: env.CLI_RUNTIME_CLAUDE_COMMAND || "claude",
+        version: String(env.CLI_RUNTIME_CLAUDE_VERSION || "").trim(),
         homeDir: path.resolve(env.CLI_RUNTIME_CLAUDE_HOME || os.homedir()),
         model: String(env.CLI_RUNTIME_CLAUDE_MODEL || "").trim(),
         permissionMode: String(env.CLI_RUNTIME_CLAUDE_PERMISSION_MODE || "bypassPermissions").trim(),
@@ -127,6 +143,7 @@ function loadConfig(env = process.env, { requireTelegramProjectsRoot = false } =
       },
       codex: {
         command: env.CLI_RUNTIME_CODEX_COMMAND || "codex",
+        version: String(env.CLI_RUNTIME_CODEX_VERSION || "").trim(),
         homeDir: path.resolve(env.CLI_RUNTIME_CODEX_HOME || os.homedir()),
         model: String(env.CLI_RUNTIME_CODEX_MODEL || "").trim(),
         sandbox: String(env.CLI_RUNTIME_CODEX_SANDBOX || "danger-full-access").trim(),

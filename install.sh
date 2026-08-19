@@ -158,6 +158,15 @@ CODEX_COMMAND=$(prompt "Codex command" "${CLI_RUNTIME_CODEX_COMMAND:-${DETECTED_
 [[ "$CODEX_COMMAND" != "~/"* ]] || CODEX_COMMAND="$HOME/${CODEX_COMMAND:2}"
 SELECTED_COMMAND=$CLAUDE_COMMAND
 [[ "$DEFAULT_DRIVER" == "codex" ]] && SELECTED_COMMAND=$CODEX_COMMAND
+
+# Carried through rather than prompted: this file is rebuilt from scratch on every run,
+# so a pin set by hand would be erased by the next upgrade — silently un-pinning the
+# deployment the pin exists to protect. Sourced above, written below, unchanged here.
+CLAUDE_VERSION=${CLI_RUNTIME_CLAUDE_VERSION:-}
+CODEX_VERSION=${CLI_RUNTIME_CODEX_VERSION:-}
+VERSION_ENFORCE=${CLI_RUNTIME_DRIVER_VERSION_ENFORCE:-warn}
+[[ "$VERSION_ENFORCE" == "warn" || "$VERSION_ENFORCE" == "block" ]] \
+  || die "driver version enforcement must be warn or block"
 command_available "$SELECTED_COMMAND" || die "$DEFAULT_DRIVER command is not executable: $SELECTED_COMMAND"
 
 TELEGRAM_TOKEN=$(prompt_secret "Telegram bot token" "${TELEGRAM_BOT_TOKEN:-}" 1)
@@ -201,8 +210,11 @@ umask 077
   env_line CLI_RUNTIME_TMUX_SOCKET "qozyai-cli-runtime-drivers"
   env_line CLI_RUNTIME_CLAUDE_COMMAND "$CLAUDE_COMMAND"
   env_line CLI_RUNTIME_CLAUDE_HOME "$HOME"
+  env_line CLI_RUNTIME_CLAUDE_VERSION "$CLAUDE_VERSION"
   env_line CLI_RUNTIME_CODEX_COMMAND "$CODEX_COMMAND"
   env_line CLI_RUNTIME_CODEX_HOME "$HOME"
+  env_line CLI_RUNTIME_CODEX_VERSION "$CODEX_VERSION"
+  env_line CLI_RUNTIME_DRIVER_VERSION_ENFORCE "$VERSION_ENFORCE"
   env_line CLI_RUNTIME_TELEGRAM_DRIVER "$DEFAULT_DRIVER"
   env_line CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT "$PROJECTS_ROOT"
   env_line CLI_RUNTIME_TELEGRAM_ALLOWED_CHATS "$ALLOWED_CHATS"
