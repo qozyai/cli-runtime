@@ -58,6 +58,11 @@ It is one seam, named, with one consumer. It is not a licence for a plugin to re
 whatever else it finds under a state directory — that remains forbidden, and the
 plugin runner deliberately has no capability that grants it.
 
+**One later note on the same seam.** Memory's *store* now also lives under
+`<workspace>/.qozyai/memory` (`0014` `decisions.md` §2). "Nothing outside may write
+there" above is about `history`, which the runtime owns; `memory/` the runtime neither
+writes nor deletes, and `0015` is the change that stopped the age floor reaching it.
+
 The alternative was a socket API returning history, which is a larger core change
 made to avoid admitting a dependency that already exists: memory has read those files
 since before it was scheduled. Writing it down is the honest option; pretending the
@@ -86,11 +91,28 @@ recorded nothing — which is exactly why core changes get that treatment.
 deployment all run as separate processes that use only the socket API and the notice
 spool. None of them required a line of `src/`.
 
-**Wrong, and known.** Age-based file cleanup was added inside `src/` because it was
-small and no seam existed yet. It is pure filesystem housekeeping with no dependency
-on a turn, so it belongs outside. It works and is tested, and it is recorded here as
-debt rather than quietly accepted — small changes going in because the seam does not
-exist yet is precisely how a core stops being small.
+**Recorded as wrong, then kept, then split.** Age-based file cleanup went inside `src/`
+because it was small and no seam existed, and this section called that debt. `0012` and
+`0013` specced moving it out; `archive-sweep` and a record-pruning janitor were built to
+do it; and the attempt produced the evidence that settled it — a change to the runtime's
+sweep landed without its outside twin, and the twin's suite went red inside a day while
+carrying a rule that would have deleted the memory store.
+
+The lesson was not "keep it inside". It was that **two implementations of the same
+deletion rule cost maintenance for ever and buy nothing**. `0018` states the split that
+actually holds:
+
+> **The runtime deletes by meaning. A janitor deletes by age.**
+
+The runtime knows which records are still referenced, which turn is live, and which
+history belongs to the last window of work. Nothing outside can know that, so retention,
+ledger compaction, liveness and the submission-record prune stay here. It does not know
+how long a voice note is worth keeping — that is a preference, and it now lives in a
+marker file read by `plugins/retention-sweep`. There is no second implementation of
+anything: the floors are gone from `src/` entirely.
+
+The distinguishing question for the next chore is not where the state lives. It is
+whether the decision needs a record.
 
 ## Layout
 

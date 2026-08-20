@@ -317,8 +317,11 @@ test("history falls back to the reduced progress when no durable snapshot was ca
   assert.deepEqual(finished.record.toolCounts, { successful: 4, failed: 0 });
 });
 
-test("archived media expires on age even while its turn is still retained", async (t) => {
-  const { root, workspace, state } = await fixture(t, { workspaceMediaMaxAgeMs: 1 });
+// Spec 0018. This test used to assert the opposite: an archived directory expired on
+// age even while its turn was retained. Age is no longer the runtime's business — the
+// archive goes when nothing references it, and `retention-sweep` expires it afterwards.
+test("an archived directory outlives any age while its turn is still retained", async (t) => {
+  const { root, workspace, state } = await fixture(t);
   state.schedulePrune = () => {};
   const source = path.join(root, "voice.ogg");
   await fs.writeFile(source, "audio");
@@ -331,17 +334,24 @@ test("archived media expires on age even while its turn is still retained", asyn
     progress: null,
   });
   const paths = state.paths(workspace);
-  assert.ok(await fs.stat(path.join(paths.historyInbox, "sub_media")).catch(() => null), "archive exists before prune");
+  const dir = path.join(paths.historyInbox, "sub_media");
+  const names = await fs.readdir(dir);
+  assert.ok(names.length > 0, "the archive has the staged file in it");
+  const ancient = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000);
+  for (const name of names) await fs.utimes(path.join(dir, name), ancient, ancient);
 
   await state.prune(workspace);
 
-  assert.equal(await fs.stat(path.join(paths.historyInbox, "sub_media")).catch(() => null), null);
-  // The turn itself is untouched: the record is what carries the conversation.
+  assert.deepEqual((await fs.readdir(dir).catch(() => [])).sort(), names.sort(),
+    "four hundred days old and retained, so the runtime keeps every file in it");
   const history = await readJsonlLossless(state.historyPath(workspace, "main"));
   assert.deepEqual(history.records.map((record) => record.submissionId), ["sub_media"]);
 });
 
-test("the outer floor removes any aged file and keeps the structure", async (t) => {
+// Spec 0018, and the test that had to fail first: the runtime no longer deletes by age
+// at all. Both floors and the whole tree walk are gone, which also removes the traversal
+// the symlink guards existed to protect.
+test("the runtime does not delete anything for being old", async (t) => {
   const { workspace, state } = await fixture(t);
   state.schedulePrune = () => {};
   await begin(state, workspace, "sub_floor");
@@ -356,16 +366,18 @@ test("the outer floor removes any aged file and keeps the structure", async (t) 
   const stale = path.join(paths.historyOutbox, "sub_floor", "stale.txt");
   await fs.mkdir(path.dirname(stale), { recursive: true });
   await fs.writeFile(stale, "old");
-  const fresh = path.join(paths.history, "keep.jsonl");
-  await fs.writeFile(fresh, "{}\n");
-  const old = new Date(Date.now() - 100 * 24 * 60 * 60 * 1000);
+  const memory = path.join(paths.root, "memory", "daily", "2026-01-01", "user.md");
+  await fs.mkdir(path.dirname(memory), { recursive: true });
+  await fs.writeFile(memory, "what the owner decided");
+  const old = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000);
   await fs.utimes(stale, old, old);
+  await fs.utimes(memory, old, old);
 
   await state.prune(workspace);
 
-  assert.equal(await fs.stat(stale).catch(() => null), null, "aged file removed");
-  assert.ok(await fs.stat(fresh).catch(() => null), "recent file kept");
-  assert.ok((await fs.stat(paths.historyOutbox)).isDirectory(), "structure kept");
+  assert.ok(await fs.stat(stale).catch(() => null), "an aged file in the runtime's own tree survives");
+  assert.ok(await fs.stat(memory).catch(() => null), "and so, still, does memory");
+  assert.equal(typeof state.sweepAgedFiles, "undefined", "the sweep itself is gone, not merely disabled");
 });
 
 test("a scheduled storm cannot evict the conversation it interrupted", () => {
@@ -502,7 +514,7 @@ test("a session's first owner turn does not delete the scheduled history before 
 });
 
 test("a freshly archived output is not pruned because its submission is old", async (t) => {
-  const { root, workspace, state } = await fixture(t, { workspaceMediaMaxAgeMs: 30 * 24 * 60 * 60 * 1000 });
+  const { root, workspace, state } = await fixture(t);
   state.schedulePrune = () => {};
   const source = path.join(root, "voice.ogg");
   await fs.writeFile(source, "audio");

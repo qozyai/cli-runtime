@@ -113,4 +113,23 @@ test("installer clones, protects configuration, and reruns idempotently", async 
     envPath,
   ]);
   assert.equal(pins, "2.1.231\n0.147.0\nblock\n");
+
+  // Spec 0018. These two decide when a terminal submission record — the surface a caller
+  // polls to collect its reply — may be deleted. The file is rebuilt from scratch on
+  // every run, so an upgrade that reset them would change that silently and then act on
+  // it. The workspace age floors are deliberately not here: they left the runtime.
+  await fs.appendFile(envPath, [
+    "CLI_RUNTIME_OPERATIONAL_RECORD_KEEP=5000",
+    "CLI_RUNTIME_OPERATIONAL_RECORD_GRACE_MS=777000",
+    "",
+  ].join("\n"));
+  const fourth = await runInstaller(path.join(project, "install.sh"), "\n".repeat(8), env);
+  assert.equal(fourth.code, 0, fourth.stderr);
+  const { stdout: retention } = await execFileAsync("bash", [
+    "-c",
+    'source "$1"; printf "%s\\n%s\\n" "$CLI_RUNTIME_OPERATIONAL_RECORD_KEEP" "$CLI_RUNTIME_OPERATIONAL_RECORD_GRACE_MS"',
+    "installer-test",
+    envPath,
+  ]);
+  assert.equal(retention, "5000\n777000\n");
 });

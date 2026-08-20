@@ -105,6 +105,9 @@ function publicSubmission(submission) {
   };
 }
 
+const DEFAULT_OPERATIONAL_RECORD_KEEP = 1000;
+const DEFAULT_OPERATIONAL_RECORD_GRACE_MS = 10 * 60_000;
+
 class SessionManager {
   constructor({ config, tmux, eventStore, navigator = null, workspaceState = null }) {
     this.config = config;
@@ -117,6 +120,15 @@ class SessionManager {
     this.sessions = new Map();
     this.active = new Map();
     this.mutationChains = new Map();
+    // Spec 0017. Defended here as well as in config because a SessionManager can be
+    // built from a partial config, and a bad value must fall back rather than turn the
+    // prune into a no-op.
+    this.operationalRecordKeep = Number.isInteger(config.operationalRecordKeep) && config.operationalRecordKeep > 0
+      ? config.operationalRecordKeep
+      : DEFAULT_OPERATIONAL_RECORD_KEEP;
+    this.operationalRecordGraceMs = Number.isFinite(config.operationalRecordGraceMs) && config.operationalRecordGraceMs >= 0
+      ? config.operationalRecordGraceMs
+      : DEFAULT_OPERATIONAL_RECORD_GRACE_MS;
   }
 
   // Observability never decides whether a turn survives. Events are appended off the
@@ -1043,7 +1055,15 @@ class SessionManager {
       terminal.push({ filePath, submissionId: record.submissionId, at: Date.parse(record.completedAt || record.acceptedAt) || 0 });
     }
     terminal.sort((a, b) => b.at - a.at);
-    for (const item of terminal.slice(1000)) {
+    // Newest first, so this tail is the oldest by rank — which is not the same as old
+    // by the clock. `send --wait` and the Telegram adapter both collect a reply by
+    // polling `GET /v1/submissions/:id` until it reports terminal, so a record deleted
+    // between finishing and the next poll turns a completed turn into a 404. Enough
+    // concurrent completions and the tail contains records that finished seconds ago,
+    // whatever the keep count is.
+    const graceCutoff = Date.now() - this.operationalRecordGraceMs;
+    for (const item of terminal.slice(this.operationalRecordKeep)) {
+      if (item.at > graceCutoff) continue;
       await fs.rm(item.filePath, { force: true });
       const sessionDirs = await fs.readdir(this.sessionsDir, { withFileTypes: true }).catch(() => []);
       for (const dir of sessionDirs) {

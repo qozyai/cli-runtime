@@ -27,15 +27,10 @@ const {
 
 const BREAK_MS = 6 * 60 * 60 * 1000;
 const WORK_WINDOW_MS = 48 * 60 * 60 * 1000;
-// Two absolute floors under the work-cluster rule. That rule only ever drops the
-// *older* clusters of a session, so a session that is abandoned stops accumulating
-// active time, never spends its budget, and keeps everything it ever archived. The
-// records are kilobytes and worth keeping; the attached media is megabytes and is
-// not. So archived input/output directories expire on age alone, and any file
-// still sitting in the tree after the outer floor goes regardless of what
-// referenced it.
-const MEDIA_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
-const WORKSPACE_FILE_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
+// Spec 0018. The two absolute age floors that used to live here are gone. The runtime
+// deletes by meaning — which records are still referenced, which turn is live, which
+// history belongs to the last window of work. How long a voice note is worth keeping is
+// a preference, and it is now a marker file read by `plugins/retention-sweep`.
 
 function parseTime(value) {
   const parsed = Date.parse(String(value || ""));
@@ -57,24 +52,6 @@ function historyUserText(message, inputDescriptors = []) {
   return parts.join("\n\n");
 }
 
-// How long ago the newest file in a directory was written. "Older than 30 days"
-// has to mean the files, not the submission: an output archived today belongs to
-// today even when the turn that produced it was accepted a month ago.
-async function newestFileAgeMs(dir, nowMs) {
-  let newest = 0;
-  const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => null);
-  if (entries === null) return 0;
-  for (const entry of entries) {
-    if (!entry.isFile()) continue;
-    const stat = await fs.stat(path.join(dir, entry.name)).catch(() => null);
-    if (stat && stat.mtimeMs > newest) newest = stat.mtimeMs;
-  }
-  if (newest === 0) {
-    const stat = await fs.stat(dir).catch(() => null);
-    newest = stat ? stat.mtimeMs : nowMs;
-  }
-  return nowMs - newest;
-}
 
 function buildWorkClusters(turns) {
   const clusters = [];
@@ -209,8 +186,6 @@ class WorkspaceState {
     this.maxOutputFiles = Number(config?.workspaceMaxOutputFiles) || 20;
     this.maxOutputFileBytes = Number(config?.workspaceMaxOutputFileBytes) || 100 * 1024 * 1024;
     this.maxOutputTotalBytes = Number(config?.workspaceMaxOutputTotalBytes) || 200 * 1024 * 1024;
-    this.mediaMaxAgeMs = Number(config?.workspaceMediaMaxAgeMs) || MEDIA_MAX_AGE_MS;
-    this.fileMaxAgeMs = Number(config?.workspaceFileMaxAgeMs) || WORKSPACE_FILE_MAX_AGE_MS;
     this.workspaceLocks = new Map();
     this.pruneScheduled = new Map();
     this.initializedWorkspaces = new Set();
@@ -679,40 +654,6 @@ class WorkspaceState {
   // first, then any submission directory left empty by the sweep. Structural
   // directories are left alone — ensure() recreates them, but removing them here
   // would race a turn that is mid-flight.
-  async sweepAgedFiles(paths, nowMs) {
-    const removed = [];
-    const walk = async (dir) => {
-      const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
-      for (const entry of entries) {
-        const entryPath = path.join(dir, entry.name);
-        // Never follow a link: the sweep must not delete anything outside the tree.
-        if (entry.isSymbolicLink()) continue;
-        if (entry.isDirectory()) {
-          await walk(entryPath);
-          continue;
-        }
-        if (!entry.isFile()) continue;
-        const stat = await fs.stat(entryPath).catch(() => null);
-        if (stat && nowMs - stat.mtimeMs > this.fileMaxAgeMs) {
-          await fs.rm(entryPath, { force: true });
-          removed.push(entryPath);
-        }
-      }
-    };
-    await walk(paths.root);
-    if (removed.length) {
-      for (const root of [paths.inbox, paths.outbox, paths.historyInbox, paths.historyOutbox]) {
-        const dirs = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
-        for (const dir of dirs) {
-          if (!dir.isDirectory()) continue;
-          const entryPath = path.join(root, dir.name);
-          const rest = await fs.readdir(entryPath).catch(() => ["keep"]);
-          if (rest.length === 0) await fs.rm(entryPath, { recursive: true, force: true });
-        }
-      }
-    }
-    return removed;
-  }
 
   async prune(workspace) {
     return this.withWorkspaceLock(workspace, async () => {
@@ -781,38 +722,23 @@ class WorkspaceState {
         await writeTextAtomic(paths.ioEvents, retainedEvents.map((record) => JSON.stringify(record)).join("\n") + (retainedEvents.length ? "\n" : ""));
       }
       const nowMs = Date.now();
-      let expiredMedia = 0;
+      // Spec 0018. Retention decides this, and only retention: a directory goes when
+      // nothing references it any more. Age is not consulted — an archived output is
+      // kept for as long as it is still referenced, however old, and expired by
+      // `retention-sweep` afterwards, however recent.
       for (const root of [paths.inbox, paths.outbox, paths.historyInbox, paths.historyOutbox]) {
-        // Only the archive expires on age. The staging roots hold the files of turns
-        // that may still be running, and a long-lived submission's id says nothing
-        // about how old its files are.
-        const archived = root === paths.historyInbox || root === paths.historyOutbox;
         const dirs = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
         for (const dir of dirs) {
           const entryPath = path.join(root, dir.name);
           if (dir.isDirectory()) {
-            // Aged by the files themselves, not by when the submission was accepted:
-            // a turn that ran for a month can still have produced its output today.
-            const aged = archived && await newestFileAgeMs(entryPath, nowMs) > this.mediaMaxAgeMs;
-            if (!retainedIds.has(dir.name) || aged) {
-              await fs.rm(entryPath, { recursive: true, force: true });
-              if (aged) expiredMedia += 1;
-            }
+            if (!retainedIds.has(dir.name)) await fs.rm(entryPath, { recursive: true, force: true });
             continue;
           }
+          // Liveness, not retention: a loose file in a staging root belongs to a turn
+          // that never finished claiming it.
           const stat = await fs.stat(entryPath).catch(() => null);
           if (stat && nowMs - stat.mtimeMs > 7 * 24 * 60 * 60 * 1000) await fs.rm(entryPath, { force: true });
         }
-      }
-      const expiredFiles = await this.sweepAgedFiles(paths, nowMs);
-      if (expiredMedia || expiredFiles.length) {
-        await this.eventStore?.append("workspace.aged_state_removed", {
-          workspace: path.resolve(workspace),
-          mediaDirectories: expiredMedia,
-          files: expiredFiles.length,
-          mediaMaxAgeMs: this.mediaMaxAgeMs,
-          fileMaxAgeMs: this.fileMaxAgeMs,
-        });
       }
     });
   }

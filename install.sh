@@ -165,6 +165,14 @@ SELECTED_COMMAND=$CLAUDE_COMMAND
 CLAUDE_VERSION=${CLI_RUNTIME_CLAUDE_VERSION:-}
 CODEX_VERSION=${CLI_RUNTIME_CODEX_VERSION:-}
 VERSION_ENFORCE=${CLI_RUNTIME_DRIVER_VERSION_ENFORCE:-warn}
+# Carried for the same reason as the pins above: this file is rebuilt from scratch on
+# every run, and these two decide when a terminal submission record — the surface a
+# caller polls to collect its reply — may be deleted. An upgrade that reset them would
+# silently change that and then act on it. Unset is written as an empty value, exactly
+# as the pins are, and config.js treats empty as "use the default". The workspace age
+# floors are deliberately absent: spec 0018 moved them out of the runtime entirely.
+OPERATIONAL_RECORD_KEEP=${CLI_RUNTIME_OPERATIONAL_RECORD_KEEP:-}
+OPERATIONAL_RECORD_GRACE_MS=${CLI_RUNTIME_OPERATIONAL_RECORD_GRACE_MS:-}
 [[ "$VERSION_ENFORCE" == "warn" || "$VERSION_ENFORCE" == "block" ]] \
   || die "driver version enforcement must be warn or block"
 command_available "$SELECTED_COMMAND" || die "$DEFAULT_DRIVER command is not executable: $SELECTED_COMMAND"
@@ -221,6 +229,8 @@ umask 077
   env_line TELEGRAM_BOT_TOKEN "$TELEGRAM_TOKEN"
   env_line OPENAI_API_KEY "$OPENAI_KEY"
   env_line CLI_RUNTIME_OPENAI_NAVIGATOR "$OPENAI_NAVIGATOR"
+  env_line CLI_RUNTIME_OPERATIONAL_RECORD_KEEP "$OPERATIONAL_RECORD_KEEP"
+  env_line CLI_RUNTIME_OPERATIONAL_RECORD_GRACE_MS "$OPERATIONAL_RECORD_GRACE_MS"
 } > "$TMP_ENV"
 chmod 600 "$TMP_ENV"
 mv "$TMP_ENV" "$ENV_FILE"

@@ -19,12 +19,26 @@ function positiveNumber(value, fallback) {
 }
 
 // Zero is a meaningful setting for the turn limits: it disables one.
+// Spec 0017. Out of range falls back to the default rather than clamping: an operator
+// who wrote a number the runtime will not honour should get the documented behaviour,
+// not a silently different one that still looks configured.
+function boundedInteger(value, fallback, { min, max, allowZero = false }) {
+  if (value === undefined || value === null || String(value).trim() === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed)) return fallback;
+  if (allowZero && parsed === 0) return 0;
+  return parsed >= min && parsed <= max ? parsed : fallback;
+}
 function nonNegativeNumber(value, fallback) {
   if (value === undefined || value === null || String(value).trim() === "") return fallback;
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
+// A terminal record has to outlive the poll that collects it, and 1,000 is the shipped
+// default rather than a limit — this is the floor below which the prune stops being
+// housekeeping and starts being a race with the reply path.
+const MIN_OPERATIONAL_RECORD_KEEP = 100;
 function configError(message) {
   const error = new Error(message);
   error.code = "EX_CONFIG";
@@ -116,6 +130,22 @@ function loadConfig(env = process.env, { requireTelegramProjectsRoot = false } =
     submissionInactivityMs: nonNegativeNumber(env.CLI_RUNTIME_SUBMISSION_INACTIVITY_MS, 30 * 60_000),
     timeoutSettleMs: positiveNumber(env.CLI_RUNTIME_TIMEOUT_SETTLE_MS, 5000),
     artifactPollMs: positiveNumber(env.CLI_RUNTIME_ARTIFACT_POLL_MS, 150),
+    // Spec 0018. The workspace age floors are gone from the runtime; `retention-sweep`
+    // reads them from a marker beside the data instead. What remains here is the one
+    // retention decision that needs a record rather than an mtime.
+    //
+    // A terminal submission record is how a caller collects its reply — both `send
+    // --wait` and the Telegram adapter poll `GET /v1/submissions/:id` until it reports
+    // a terminal status. Pruning is therefore not free at small counts: keep 0 and the
+    // record can be gone before the next poll, which turns a finished turn into a 404.
+    // Hence a floor, and hence the grace window below.
+    operationalRecordKeep: boundedInteger(env.CLI_RUNTIME_OPERATIONAL_RECORD_KEEP, 1000, {
+      min: MIN_OPERATIONAL_RECORD_KEEP, max: Number.MAX_SAFE_INTEGER,
+    }),
+    // The count alone cannot be safe: enough concurrent completions and the newest
+    // records are themselves the ones over the line. No terminal record is deleted
+    // until it has had this long to be collected.
+    operationalRecordGraceMs: nonNegativeNumber(env.CLI_RUNTIME_OPERATIONAL_RECORD_GRACE_MS, 10 * 60_000),
     // A pinned driver that drifts is reported, not silently tolerated. Blocking is
     // opt-in: a patch bump that breaks nothing should not take the bot off the air.
     driverVersionEnforce: driverVersionEnforce(env),

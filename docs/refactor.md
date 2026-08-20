@@ -200,14 +200,25 @@ thing.
 | speech | — | Not a job. Runs inline during a turn; stays a plain skill. |
 | deployment | — | Not a job. One-shot, must outlive the runtime restart. |
 
-### Tier 2 — inside the runtime today, and movable
+### Tier 2 — was "inside the runtime today, and movable". **Struck, 2026-08-19.**
 
-| Candidate | Where it lives | Why it can move |
+None of these move. `0012` is withdrawn, `0013` was answered (c), and `0017` states the
+rule that replaced the plan: **only the runtime deletes.** Retention stays in `src/`,
+takes its policy from the environment, and runs on the runtime's own clock.
+
+The row-by-row reasoning below was not wrong about separability — it was wrong about
+what separability buys. Both candidates were built as plugins with equivalence tests,
+and the evidence came back against them: `0015` changed the runtime's sweep, the twin
+in `archive-sweep` was not updated, and its suite went red inside a day while carrying
+a rule that would have deleted memory. A second implementation of a deletion rule is a
+standing maintenance cost with no benefit.
+
+| Candidate | Where it lives | Disposition |
 |---|---|---|
-| **Workspace retention / prune** | `workspace-state.js` | Reads everything from disk — pending outputs from the I/O ledger, retained ids from the history records. Touches no in-memory session state. A filesystem janitor that happens to be called from inside a turn. |
-| **Archive file floor** (90d) | `workspace-state.js` | Pure file-age rules, no runtime state. Separable today — see spec `0012`. |
-| **Archive media floor** (30d) | `workspace-state.js` | **Not separable.** It is one `if` with the retention decision, over the same listing, under the same lock. It moves with retention, not before it — spec `0012` §2. |
-| **Operational prune** | `session-manager.js` | Separable — it reads no in-memory state. But moving it would be the *third* plugin reaching into runtime state, and three is a capability nobody admitted to designing. Blocked on a decision, spec `0013` §3. |
+| **Workspace retention / prune** | `workspace-state.js` | Stays, and always will: it rewrites records inside a live `.jsonl`. The env policy and the periodic tick were `0017` and are gone again with `0018`. |
+| **Archive file floor** (90d) | ~~`workspace-state.js`~~ | **Left, in `0018`** — but as a marker-driven janitor with no twin in `src/`, not as the equivalence-tested copy `0012` planned. |
+| **Archive media floor** (30d) | ~~`workspace-state.js`~~ | **Left, in `0018`.** `0012` §2 was right that it could not be *lifted* — the answer was to delete it and let age be somebody else's job entirely. |
+| **Operational prune** | `session-manager.js` | Stays. `runtime-janitor` was built under `0013` (b) and deleted under (c). |
 | **Auth expiry watch** | *built, outside* | Highest value of the set — see below, including what it turned out not to be able to do. |
 | **Knowledge / memory backup** | *does not exist* | Periodic, no runtime coupling. |
 | **Health digest** | *does not exist* | What ran, what failed, what is stuck. |
