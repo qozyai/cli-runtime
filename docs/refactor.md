@@ -1,7 +1,8 @@
 # Refactor: core, drivers, surface, and jobs as plugins
 
-**Status:** the layout has shipped. Steps 1–4 of §8 are done and deployed; step 5
-is the next one and is deliberately gated.
+**Status:** the layout has shipped. Steps 1 to 5 of §8 are done and deployed. Step 6 is
+partly done and partly cancelled: see the Tier 2 table, which was rewritten on
+2026-08-19 and again on 2026-08-20 after two reversals.
 
 | Step | State |
 |---|---|
@@ -10,7 +11,7 @@ is the next one and is deliberately gated.
 | 3. Dependency test | `cabbbaa` — `test/source-layout.test.js`, with negative fixtures |
 | 4. Per-directory `AGENTS.md` | `7a6112e` |
 | 5. Plugin runner | **done** — built in the private `qozyai/plugins` repo, with four plugins |
-| 6. Move Tier 2 candidates out | started: the auth watch is built; nothing has left `src/` yet |
+| 6. Move Tier 2 candidates out | the auth watch is built; the two archive age floors left in `0018`; the rest either stay by decision or do not exist yet |
 
 The runner lives outside this repository, at `/code/qozyai/plugins`, with its own
 `AGENTS.md`. On this machine it runs as one user unit with the queue janitor active;
@@ -202,16 +203,25 @@ thing.
 
 ### Tier 2 — was "inside the runtime today, and movable". **Struck, 2026-08-19.**
 
-None of these move. `0012` is withdrawn, `0013` was answered (c), and `0017` states the
-rule that replaced the plan: **only the runtime deletes.** Retention stays in `src/`,
-takes its policy from the environment, and runs on the runtime's own clock.
+This section was rewritten twice in two days, and the second rewrite is the one that
+holds. `0018` states the rule:
 
-The row-by-row reasoning below was not wrong about separability — it was wrong about
-what separability buys. Both candidates were built as plugins with equivalence tests,
-and the evidence came back against them: `0015` changed the runtime's sweep, the twin
-in `archive-sweep` was not updated, and its suite went red inside a day while carrying
-a rule that would have deleted memory. A second implementation of a deletion rule is a
-standing maintenance cost with no benefit.
+> **The runtime deletes by meaning. A janitor deletes by age.**
+
+So the two archive age floors did leave, and the record-based retention did not. Which
+is neither what this section originally proposed nor what the 2026-08-19 rewrite of it
+claimed.
+
+The row-by-row reasoning below was not wrong about separability. It was wrong about what
+separability buys. Both candidates were first built as plugins holding a *copy* of a
+runtime rule, kept in step by an equivalence test, and the evidence came back against
+that shape within a day: `0015` changed the runtime's sweep, the twin in `archive-sweep`
+was not updated, and its suite went red while carrying a rule that would by then have
+deleted the memory store.
+
+The lesson was not "keep it inside". It was that two implementations of one deletion rule
+cost maintenance for ever and buy nothing. `retention-sweep` has no twin: the floors are
+gone from `src/` entirely, and the policy is a marker file beside the data.
 
 | Candidate | Where it lives | Disposition |
 |---|---|---|
@@ -236,12 +246,16 @@ once when it is repaired. The failure this exists for is credentials expiring wi
 broken repair path and nobody noticing — which has silently killed a production agent
 for weeks at a time. Minutes instead of weeks is the win that was actually available.
 
-**Cost of moving retention out.** `prune()` runs under an in-process lock. An external
-plugin cannot take that lock, so the two could race — the runtime appending a turn
-record while the plugin rewrites the same file. Moving it out therefore requires a
-**shared on-disk lock** both honour. That is a small change and arguably an
-improvement: it turns an implicit in-process guarantee into an explicit seam. Until it
-exists, retention stays where it is.
+**Cost of moving retention out, and why the age floors did not pay it.** `prune()` runs
+under an in-process lock that an external plugin cannot take, so a plugin rewriting the
+same `.jsonl` the runtime is appending to would race it. That is still true, and it is
+why record-based retention stays in `src/` and needs no further discussion.
+
+The age floors escaped the problem rather than solving it. `retention-sweep` is scoped by
+its marker to `io/history`, which is written once when a turn finalizes and never touched
+again. There is no concurrent writer, so there is nothing to serialize against and no
+shared lock is needed. A shared on-disk lock would only be required by something that
+wanted to move the record surgery, and nothing does.
 
 ### Tier 3 — cannot move, named so nobody tries
 
@@ -263,7 +277,7 @@ Measured, not estimated:
 - **3** references outside `src/` — two in `package.json`, one in `bin/`
 
 ≈ **97 mechanical line edits and 21 moves.** Zero behaviour change. The suite (162
-tests) is the safety net: a wrong path fails immediately with `MODULE_NOT_FOUND`.
+tests at the time, 174 now) is the safety net: a wrong path fails immediately with `MODULE_NOT_FOUND`.
 
 ## 8. Sequencing
 
@@ -275,17 +289,23 @@ tests) is the safety net: a wrong path fails immediately with `MODULE_NOT_FOUND`
    the test is decoration.
 4. Add the per-directory `AGENTS.md` files.
 5. Build the plugin runner when the next job needs it — not before.
-6. Move Tier 2 candidates out one at a time, retention last because it needs the
-   shared lock.
+6. Move Tier 2 candidates out one at a time. Partly done: the archive age floors left
+   in `0018`, record-based retention stays by decision, and the two remaining rows are
+   jobs that do not exist yet.
 
 **This move is itself a core change** by the definition in `AGENTS.md`: it touches
 every file in `src/`. It changes no behaviour, which is exactly why it must be its own
 commit with nothing else in it.
 
-## 9. Debt this records
+## 9. Debt this records, and how it was paid
 
 Archive age floors were added inside `src/` because the change was small and no seam
-existed yet. They are pure file-age janitorial rules with no dependency on a turn, so
-they belong outside. They work and are tested, and they are recorded here rather than
-quietly accepted — small changes going in because the seam does not exist yet is
-precisely how a core stops being small.
+existed yet. This section recorded that as debt rather than letting it pass quietly,
+on the grounds that small changes going in because the seam does not exist is precisely
+how a core stops being small.
+
+**Paid on 2026-08-20, in `0018`.** Both floors were deleted from `src/` and age became
+`plugins/retention-sweep`'s job. It took three attempts, and the two that failed are
+worth more than the one that worked: both tried to move a *copy* of the rule and keep two
+implementations in step, and both drifted. The version that shipped moved the decision
+instead of the code, and left nothing behind to drift from.
