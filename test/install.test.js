@@ -28,6 +28,21 @@ function runInstaller(script, input, env) {
   });
 }
 
+test("the bin entry point reports a config failure as exit 78", async (t) => {
+  const project = path.resolve(__dirname, "..");
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-exit-code-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  // The installer's unit says RestartPreventExitStatus=78, and the unit runs the
+  // bin wrapper, so the wrapper is the layer that must carry the code through.
+  // Asserting the unit text alone is how this gap stayed invisible.
+  const result = await execFileAsync("node", [path.join(project, "bin", "cli-runtime.js"), "telegram"], {
+    env: { PATH: process.env.PATH, HOME: root, CLI_RUNTIME_STATE_DIR: path.join(root, "state") },
+  }).then(() => null, (err) => err);
+  assert.ok(result, "a missing projects root must fail startup");
+  assert.match(String(result.stderr), /CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT is required/);
+  assert.equal(result.code, 78);
+});
+
 test("installer clones, protects configuration, and reruns idempotently", async (t) => {
   const project = path.resolve(__dirname, "..");
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-install-"));
