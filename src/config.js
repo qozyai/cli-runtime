@@ -3,6 +3,7 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { DRIVERS } = require("./drivers/drivers");
 
 function parseJsonArray(value, fallback = []) {
   if (!String(value || "").trim()) return fallback;
@@ -81,6 +82,17 @@ function telegramSystemIngressChatIds(env) {
     throw configError(`${key} must not contain duplicate Telegram user IDs`);
   }
   return new Set(values);
+}
+
+// Spec 0020. Every sibling Telegram knob fails at load; a typo here used to
+// surface per-message instead, as an opaque runtime error on the first send.
+function telegramDefaultDriver(env) {
+  const key = "CLI_RUNTIME_TELEGRAM_DRIVER";
+  const value = String(env[key] || "claude").trim().toLowerCase();
+  if (!DRIVERS.has(value)) {
+    throw configError(`${key} must be one of: ${[...DRIVERS].join(", ")}`);
+  }
+  return value;
 }
 
 function telegramDefaultProject(env) {
@@ -183,7 +195,7 @@ function loadConfig(env = process.env, { requireTelegramProjectsRoot = false } =
     },
     telegram: {
       token: String(env.TELEGRAM_BOT_TOKEN || "").trim(),
-      defaultDriver: String(env.CLI_RUNTIME_TELEGRAM_DRIVER || "claude").trim().toLowerCase(),
+      defaultDriver: telegramDefaultDriver(env),
       defaultProject: telegramDefaultProject(env),
       projectsRoot: telegramProjectsRoot(env, { required: requireTelegramProjectsRoot }),
       statusEditIntervalMs: positiveNumber(env.CLI_RUNTIME_TELEGRAM_STATUS_EDIT_MS, 5000),

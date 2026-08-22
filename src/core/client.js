@@ -2,13 +2,18 @@
 
 const http = require("node:http");
 
-function request(socketPath, method, requestPath, body = null) {
+// Above the longest legitimate wait on the API (the 30-second event long-poll),
+// so a wedged daemon fails callers visibly instead of hanging them forever.
+const REQUEST_TIMEOUT_MS = 45_000;
+
+function request(socketPath, method, requestPath, body = null, { timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
   return new Promise((resolve, reject) => {
     const payload = body === null ? null : JSON.stringify(body);
     const req = http.request({
       socketPath,
       method,
       path: requestPath,
+      timeout: timeoutMs,
       headers: payload ? {
         "content-type": "application/json",
         "content-length": Buffer.byteLength(payload),
@@ -30,6 +35,9 @@ function request(socketPath, method, requestPath, body = null) {
         }
         resolve(parsed);
       });
+    });
+    req.on("timeout", () => {
+      req.destroy(new Error(`runtime request timed out after ${timeoutMs}ms: ${method} ${requestPath}`));
     });
     req.on("error", reject);
     if (payload) req.end(payload);

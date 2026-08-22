@@ -76,6 +76,21 @@ test("navigator uses the direct OpenAI helper when no endpoint is configured", a
   assert.equal(payload.allowedActions.submit_text.maxChars, 256);
 });
 
+test("an unwritable event log does not discard a navigation decision", async () => {
+  const navigator = new Navigator({
+    config: { navigator: { url: "http://navigator.test/decide", apiKey: "", timeoutMs: 1000 } },
+    eventStore: { append: async () => { throw new Error("event log unwritable"); } },
+    fetchImpl: async () => ({ ok: true, json: async () => ({ action: "press_key", key: "Enter", reason: "continue" }) }),
+  });
+  const decision = await navigator.decide({
+    driver: "claude",
+    phase: "session_start",
+    goal: "reach prompt",
+    screen: "unknown dialog",
+  });
+  assert.equal(decision.action, "press_key");
+});
+
 test("an OpenAI key does not implicitly enable terminal navigation", () => {
   const navigator = new Navigator({
     config: { navigator: { url: "", apiKey: "", timeoutMs: 1000, useOpenAI: false } },

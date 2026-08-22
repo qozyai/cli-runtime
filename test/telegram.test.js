@@ -1375,6 +1375,132 @@ test("Telegram honours retry_after instead of failing the send", async () => {
   await assert.rejects(() => adapter.api("sendMessage", { chat_id: 42, text: "x" }), /chat not found/);
 });
 
+test("a preempted turn finalizes its bubble instead of leaving it Working", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-preempt-bubble-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const adapter = new TelegramAdapter({
+    config: {
+      stateDir: root,
+      socketPath: path.join(root, "runtime.sock"),
+      telegram: { token: "token", defaultDriver: "claude", projectsRoot: root, allowedChatIds: new Set() },
+    },
+    fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true, result: { message_id: 1 } }) }),
+  });
+  await adapter.init();
+  await bindRoute(adapter, root);
+  adapter.ensureSession = async () => ({ status: "ready" });
+  adapter.runtime = async (method, requestPath) => {
+    if (method === "POST" && requestPath.endsWith("/submissions")) {
+      return { submission: { submissionId: "sub-preempted" } };
+    }
+    if (method === "POST" && requestPath.endsWith("/interrupt")) return { interrupted: true };
+    throw new Error(`unexpected ${method} ${requestPath}`);
+  };
+  adapter.typing = async () => {};
+  adapter.sendStatus = async () => ({ message_id: 55 });
+  adapter.waitSubmission = async () => {
+    // A barrier lands while the turn is running: the operation is cancelled
+    // before the wait returns, which used to strand the bubble on "Working.".
+    const operation = adapter.activeOperationByRoute.get("42:main");
+    operation.cancelled = true;
+    operation.controller.abort();
+    return { submissionId: "sub-preempted", status: "interrupted", outputs: [] };
+  };
+  adapter.send = async () => {};
+  const finalized = [];
+  adapter.finalizeStatus = async (_message, messageId, text) => { finalized.push({ messageId, text }); };
+
+  await adapter.handle({ chat: { id: 42 }, message_id: 21, text: "long running work" });
+
+  assert.deepEqual(finalized, [{ messageId: 55, text: "Interrupted." }]);
+});
+
+test("a message cancelled before starting is reported, not swallowed", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-set-aside-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const adapter = new TelegramAdapter({
+    config: {
+      stateDir: root,
+      socketPath: path.join(root, "runtime.sock"),
+      telegram: { token: "token", defaultDriver: "claude", projectsRoot: root, allowedChatIds: new Set() },
+    },
+    fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true, result: { message_id: 1 } }) }),
+  });
+  await adapter.init();
+  await bindRoute(adapter, root);
+  const runtimeCalls = [];
+  adapter.runtime = async (method, requestPath) => {
+    runtimeCalls.push(`${method} ${requestPath}`);
+    throw new Error(`unexpected ${method} ${requestPath}`);
+  };
+  const sent = [];
+  adapter.send = async (_message, text) => { sent.push(text); };
+  // A later /reset barrier is already pending when this message's turn starts.
+  adapter.pendingBarriers.set("42:main", [{ ordinal: 5, command: { name: "reset", argument: "" } }]);
+
+  await adapter.handle({ chat: { id: 42 }, message_id: 22, text: "queued behind a barrier" }, { ordinal: 1 });
+
+  assert.equal(runtimeCalls.some((call) => call.endsWith("/submissions")), false);
+  assert.ok(sent.some((text) => /Set aside|not run/i.test(text)));
+});
+
+test("a failed offset write does not strand an already-queued update", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-offset-"));
+  const telegramDir = path.join(root, "telegram");
+  t.after(async () => {
+    await fs.chmod(telegramDir, 0o700).catch(() => {});
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  const adapter = new TelegramAdapter({
+    config: {
+      stateDir: root,
+      telegram: { token: "token", defaultDriver: "claude", projectsRoot: root, allowedChatIds: new Set(["42"]) },
+    },
+    fetchImpl: async () => { throw new Error("unused"); },
+  });
+  await adapter.init();
+  const owner = { chat: { id: 42, type: "private" }, from: { id: 42, is_bot: false }, message_id: 1, text: "claim" };
+  assert.equal(await adapter.ownerStore.authorize(owner), true);
+  const dispatched = [];
+  adapter.dispatch = (_update, queuePath) => { dispatched.push(queuePath); };
+  await fs.chmod(telegramDir, 0o500);
+  await adapter.acceptUpdate({
+    update_id: 9,
+    message: { ...owner, message_id: 2, text: "queued despite the disk" },
+  });
+  assert.equal(dispatched.length, 1);
+});
+
+test("a message whose only content is a rich body is admitted", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-rich-only-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const config = {
+    stateDir: root,
+    telegram: { token: "token", defaultDriver: "claude", projectsRoot: root, allowedChatIds: new Set(["42"]) },
+  };
+  const adapter = new TelegramAdapter({ config });
+  await adapter.init();
+  const owner = { chat: { id: 42, type: "private" }, from: { id: 42, is_bot: false }, message_id: 1, text: "claim" };
+  assert.equal(await adapter.ownerStore.authorize(owner), true);
+  assert.equal(await adapter.acceptedMessage({
+    message: {
+      chat: { id: 42, type: "private" },
+      from: { id: 42, is_bot: false },
+      message_id: 2,
+      rich_message: { blocks: [{ type: "paragraph", text: "forwarded rich content" }] },
+    },
+  }), true);
+  // Truly empty stays refused.
+  assert.equal(await adapter.acceptedMessage({
+    message: {
+      chat: { id: 42, type: "private" },
+      from: { id: 42, is_bot: false },
+      message_id: 3,
+      rich_message: { blocks: [] },
+    },
+  }), false);
+});
+
 test("Telegram reports a terminal handler error and retires its queue record", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-visible-error-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

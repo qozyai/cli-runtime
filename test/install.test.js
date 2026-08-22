@@ -109,6 +109,16 @@ test("installer clones, protects configuration, and reruns idempotently", async 
   assert.doesNotMatch(`${second.stdout}\n${second.stderr}`, new RegExp(token));
   const { stdout: dirty } = await execFileAsync("git", ["-C", installDir, "status", "--porcelain"]);
   assert.equal(dirty, "");
+  // A rerun with default answers must keep updating the directory it installed
+  // to, not quietly start a second install at the XDG default path.
+  const { stdout: savedInstallDir } = await execFileAsync("bash", [
+    "-c",
+    'source "$1"; printf "%s" "$CLI_RUNTIME_INSTALL_DIR"',
+    "installer-test",
+    envPath,
+  ]);
+  assert.equal(savedInstallDir, installDir);
+  await assert.rejects(() => fs.access(path.join(home, "data", "qozyai-cli-runtime")));
 
   // A release is validated against exact driver builds, and this file is rebuilt from
   // scratch on every run. A pin the installer does not carry through would be erased by

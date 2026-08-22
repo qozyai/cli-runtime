@@ -4,9 +4,9 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { writeAtomic } = require("../core/util");
 const { validProjectName } = require("./project-catalog");
+const { DRIVERS } = require("../drivers/drivers");
 
 const ROUTE_KEY_PATTERN = /^-?\d+:(?:main|\d+)$/;
-const DRIVERS = new Set(["claude", "codex"]);
 
 function cloneRecord(record) {
   return record ? Object.freeze({ driver: record.driver, ...(record.project ? { project: record.project } : {}) }) : null;

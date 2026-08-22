@@ -11,6 +11,7 @@ const {
   isStartupAuthScreen,
   normalizeDriver,
   recentScreen,
+  startupScreenAction,
 } = require("../drivers/drivers");
 const { baselineArtifacts, historyProgress, publicProgress, watchArtifacts } = require("./artifacts");
 const {
@@ -380,16 +381,7 @@ class SessionManager {
   }
 
   async handleKnownStartupScreen(session, screen, previousAction) {
-    const recent = recentScreen(screen);
-    let action = null;
-    if (session.driver === "claude") {
-      if (/WARNING: Claude Code running in Bypass Permissions mode/i.test(recent)) action = "2";
-      else if (/Try the new fullscreen renderer\?/i.test(recent)) action = "2";
-      else if (/Choose the text style|Security notes|Quick safety check/i.test(recent)) action = "Enter";
-    } else {
-      if (/Do you trust the contents of this directory\?/i.test(recent)) action = "1";
-      else if (/update available/i.test(recent) && /skip/i.test(recent)) action = "2";
-    }
+    const action = startupScreenAction(session.driver, screen);
     if (!action) return null;
     // Keep the action latched while its dialog remains in the captured pane. The
     // terminal retains scrollback after advancing, so clearing the latch on the
@@ -1062,10 +1054,11 @@ class SessionManager {
     // concurrent completions and the tail contains records that finished seconds ago,
     // whatever the keep count is.
     const graceCutoff = Date.now() - this.operationalRecordGraceMs;
-    for (const item of terminal.slice(this.operationalRecordKeep)) {
-      if (item.at > graceCutoff) continue;
+    const expired = terminal.slice(this.operationalRecordKeep).filter((item) => item.at <= graceCutoff);
+    if (expired.length === 0) return;
+    const sessionDirs = await fs.readdir(this.sessionsDir, { withFileTypes: true }).catch(() => []);
+    for (const item of expired) {
       await fs.rm(item.filePath, { force: true });
-      const sessionDirs = await fs.readdir(this.sessionsDir, { withFileTypes: true }).catch(() => []);
       for (const dir of sessionDirs) {
         if (dir.isDirectory()) await fs.rm(path.join(this.sessionsDir, dir.name, "prompts", `${safeId(item.submissionId, 40)}.txt`), { force: true });
       }

@@ -103,6 +103,16 @@ test("Telegram projects-root configuration is explicit and rejects dangerous roo
     }),
     /lowercase SHA-256/,
   );
+  assert.throws(() => loadConfig({
+    ...base,
+    CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT: root,
+    CLI_RUNTIME_TELEGRAM_DRIVER: "claude-code",
+  }), (error) => error.code === "EX_CONFIG" && /CLI_RUNTIME_TELEGRAM_DRIVER/.test(error.message));
+  assert.equal(loadConfig({
+    ...base,
+    CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT: root,
+    CLI_RUNTIME_TELEGRAM_DRIVER: " Codex ",
+  }).telegram.defaultDriver, "codex");
   const config = loadConfig({ ...base, CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT: root }, { requireTelegramProjectsRoot: true });
   assert.equal(config.telegram.projectsRoot, await fs.realpath(root));
   assert.equal(Object.hasOwn(config.telegram, "workspace"), false);

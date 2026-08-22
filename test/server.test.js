@@ -129,3 +129,27 @@ test("a second daemon cannot take a live state directory or unlink its socket", 
   assert.equal((await request(configA.socketPath, "GET", "/health")).ok, true);
   await assert.rejects(() => fs.access(configB.socketPath));
 });
+
+test("the socket client fails a wedged request instead of hanging", async (t) => {
+  const net = require("node:net");
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-client-timeout-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const socketPath = path.join(root, "wedged.sock");
+  // Accepts the connection and never answers: the failure mode of a wedged
+  // daemon. The accepted sockets stay paused and never observe the client's
+  // FIN, so cleanup must destroy them or close() would wait forever.
+  const sockets = new Set();
+  const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => new Promise((resolve) => {
+    for (const socket of sockets) socket.destroy();
+    server.close(resolve);
+  }));
+  await assert.rejects(
+    () => request(socketPath, "GET", "/health", null, { timeoutMs: 200 }),
+    /timed out after 200ms/,
+  );
+});

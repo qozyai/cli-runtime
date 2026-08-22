@@ -4,10 +4,34 @@ const path = require("node:path");
 
 const DRIVERS = new Set(["claude", "codex"]);
 
+// The one place a provider's human name exists. Everything above this directory
+// addresses drivers by key and labels them through here.
+const DRIVER_LABELS = { claude: "Claude Code", codex: "Codex" };
+
 function normalizeDriver(value) {
   const driver = String(value || "").trim().toLowerCase();
   if (!DRIVERS.has(driver)) throw new Error(`unsupported driver: ${driver || "empty"}`);
   return driver;
+}
+
+function driverLabel(driver) {
+  return DRIVER_LABELS[driver] || String(driver || "");
+}
+
+// The startup dialogs a driver may show before its composer, and the keystroke
+// that answers each. Provider vocabulary, so it lives behind this seam: a third
+// driver's dialogs land here and nowhere else. Spec 0020.
+function startupScreenAction(driver, screen) {
+  const recent = recentScreen(screen);
+  if (driver === "claude") {
+    if (/WARNING: Claude Code running in Bypass Permissions mode/i.test(recent)) return "2";
+    if (/Try the new fullscreen renderer\?/i.test(recent)) return "2";
+    if (/Choose the text style|Security notes|Quick safety check/i.test(recent)) return "Enter";
+    return null;
+  }
+  if (/Do you trust the contents of this directory\?/i.test(recent)) return "1";
+  if (/update available/i.test(recent) && /skip/i.test(recent)) return "2";
+  return null;
 }
 
 function recentScreen(screen, lines = 60) {
@@ -166,11 +190,13 @@ function authCommand(config, driver) {
 }
 
 module.exports = {
+  DRIVERS,
   artifactRoot,
   authCommand,
   buildLaunch,
   driverConfig,
   driverExit,
+  driverLabel,
   isAuthRequired,
   isCollapsedPasteReceipt,
   isPastedPromptEditable,
@@ -179,5 +205,6 @@ module.exports = {
   normalizeDriver,
   parseDriverVersion,
   recentScreen,
+  startupScreenAction,
   versionCommand,
 };

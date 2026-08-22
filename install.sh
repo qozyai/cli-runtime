@@ -214,6 +214,9 @@ TMP_ENV="$ENV_FILE.tmp.$$"
 umask 077
 {
   env_line CLI_RUNTIME_STATE_DIR "$STATE_DIR"
+  # Installer-owned, not read by the runtime: a rerun must find the directory it
+  # installed to last time instead of quietly defaulting back to the XDG path.
+  env_line CLI_RUNTIME_INSTALL_DIR "$INSTALL_DIR"
   env_line CLI_RUNTIME_SOCKET "$STATE_DIR/runtime.sock"
   env_line CLI_RUNTIME_TMUX_SOCKET "qozyai-cli-runtime-drivers"
   env_line CLI_RUNTIME_CLAUDE_COMMAND "$CLAUDE_COMMAND"

@@ -10,6 +10,7 @@ const { ProjectCatalog, validProjectName } = require("./project-catalog");
 const { OwnerStore, senderUserId, userId } = require("./owner-store");
 const { RouteStore } = require("./route-store");
 const { NoticeSpool, RunMarker, releaseIdFromPath, restartAnnouncement } = require("../core/notices");
+const { DRIVERS, driverLabel } = require("../drivers/drivers");
 
 const TELEGRAM_DOCUMENT_LIMIT = 50 * 1024 * 1024;
 const TERMINAL_SUBMISSION_STATES = new Set(["completed", "failed", "interrupted"]);
@@ -407,7 +408,7 @@ class TelegramAdapter {
   }
 
   async authMessage(driver, force = false) {
-    const name = driver === "claude" ? "Claude Code" : "Codex";
+    const name = driverLabel(driver);
     let terminal = true;
     try {
       await this.runtime("POST", `/v1/auth/${driver}/start`, { force });
@@ -422,7 +423,7 @@ class TelegramAdapter {
   }
 
   async attentionMessage(driver, session) {
-    const name = driver === "claude" ? "Claude Code" : "Codex";
+    const name = driverLabel(driver);
     let terminal = true;
     try {
       await this.runtime("POST", `/v1/auth/${driver}/start`, { force: false });
@@ -755,7 +756,7 @@ class TelegramAdapter {
         return { catalogError: error };
       }
     }
-    if (command.name === "driver" && !["claude", "codex"].includes(command.argument.toLowerCase())) {
+    if (command.name === "driver" && !DRIVERS.has(command.argument.toLowerCase())) {
       return { validationError: "driver" };
     }
     const route = this.routeState(message);
@@ -825,7 +826,7 @@ class TelegramAdapter {
       }
     }
     await this.routeStore.update(routeKey, { driver: route.driver, project: target.name });
-    await this.send(message, `Project "${target.name}" selected with ${route.driver === "claude" ? "Claude Code" : "Codex"}.`);
+    await this.send(message, `Project "${target.name}" selected with ${driverLabel(route.driver)}.`);
   }
 
   async controlStatus(message) {
@@ -892,7 +893,7 @@ class TelegramAdapter {
       });
       if (info?.command) {
         current = {
-          label: `${route.driver === "claude" ? "Claude Code" : "Codex"} · ${route.project}`,
+          label: `${driverLabel(route.driver)} · ${route.project}`,
           attachCommand: info.command,
         };
       }
@@ -976,13 +977,13 @@ class TelegramAdapter {
 
   async controlDriver(message, command, preparation = {}) {
     const driver = command.argument.toLowerCase();
-    if (preparation.validationError === "driver" || !["claude", "codex"].includes(driver)) {
-      await this.send(message, "Choose /driver claude or /driver codex.");
+    if (preparation.validationError === "driver" || !DRIVERS.has(driver)) {
+      await this.send(message, `Choose ${[...DRIVERS].map((name) => `/driver ${name}`).join(" or ")}.`);
       return;
     }
     const route = this.routeState(message);
     if (route.driver === driver) {
-      await this.send(message, `${driver === "claude" ? "Claude Code" : "Codex"} is already selected.`);
+      await this.send(message, `${driverLabel(driver)} is already selected.`);
       return;
     }
     if (preparation.catalogError) return this.sendCatalogError(message, preparation.catalogError, route.project);
@@ -1016,8 +1017,8 @@ class TelegramAdapter {
       }
     }
     await this.routeStore.update(this.routeKey(message), { driver, ...(route.project ? { project: route.project } : {}) });
-    const selectedLabel = driver === "claude" ? "Claude Code" : "Codex";
-    const previousLabel = route.driver === "claude" ? "Claude Code" : "Codex";
+    const selectedLabel = driverLabel(driver);
+    const previousLabel = driverLabel(route.driver);
     await this.send(message, `${selectedLabel} selected. The next message starts or resumes its own conversation lazily; ${previousLabel} chat context is not transferred.`);
   }
 
@@ -1048,7 +1049,7 @@ class TelegramAdapter {
       await this.sendCatalogError(message, err, route.project);
       return;
     }
-    await this.send(message, `Project "${route.project}" is selected with ${route.driver === "claude" ? "Claude Code" : "Codex"}. Send a message and the driver will be attempted.`);
+    await this.send(message, `Project "${route.project}" is selected with ${driverLabel(route.driver)}. Send a message and the driver will be attempted.`);
   }
 
   async handleOrdinary(message, route, ordinal = 0, parts = null) {
@@ -1069,6 +1070,7 @@ class TelegramAdapter {
     };
     this.activeOperationByRoute.set(routeKey, operation);
     let inputs = [];
+    let statusMessage = null;
     try {
       const laterBarrier = (this.pendingBarriers.get(routeKey) || [])
         .find((record) => record.ordinal > ordinal && this.barrierWouldPreempt(operation, record.command));
@@ -1171,7 +1173,7 @@ class TelegramAdapter {
       // Spec 0019. The bubble is a courtesy; the accepted turn is the obligation.
       // A failed send here degrades to polling without a status message, and
       // finalization falls back to a fresh message on its own.
-      const statusMessage = await this.sendStatus(message).catch(() => null);
+      statusMessage = await this.sendStatus(message).catch(() => null);
       const completed = await this.waitSubmission(message, operation.submissionId, statusMessage?.message_id);
       this.checkOperation(operation);
       if (completed.status === "interrupted") {
@@ -1206,7 +1208,19 @@ class TelegramAdapter {
         }
       }
     } catch (err) {
-      if (err.code === "ROUTE_OPERATION_CANCELLED") return;
+      if (err.code === "ROUTE_OPERATION_CANCELLED") {
+        // Spec 0020. A preempted turn must not leave its bubble reading
+        // "Working." forever, and a message cancelled before it ever started
+        // must not vanish without a trace.
+        if (statusMessage) {
+          await this.finalizeStatus(message, statusMessage.message_id, "Interrupted.").catch(() => {});
+        } else if (operation.submissionId) {
+          await this.send(message, "Interrupted.").catch(() => {});
+        } else {
+          await this.send(message, "Set aside by a later command before it started; resend it if it is still wanted.").catch(() => {});
+        }
+        return;
+      }
       if (["PROJECT_MISSING", "PROJECTS_ROOT_UNAVAILABLE", "PROJECT_INVALID"].includes(err.code)) {
         await this.sendCatalogError(message, err, route.project);
         return;
@@ -1398,7 +1412,10 @@ class TelegramAdapter {
 
   async admitUpdate(update) {
     const message = update?.message;
-    if (!message || (!message.text && !message.caption && !this.telegramFile(message))) return null;
+    // messageBody, not raw fields: a message whose only content is a rich_message
+    // body is as real as a text one, and the rest of the adapter already treats
+    // it that way. Spec 0020.
+    if (!message || (!messageBody(message) && !this.telegramFile(message))) return null;
     const owner = this.ownerStore.get();
     if (owner) {
       if (await this.ownerStore.authorize(message)) return update;
@@ -1435,7 +1452,14 @@ class TelegramAdapter {
       if (!existing) await writeAtomic(queuePath, update);
     }
     this.offset = nextOffset;
-    await writeAtomic(this.offsetPath, { version: 1, offset: this.offset });
+    try {
+      await writeAtomic(this.offsetPath, { version: 1, offset: this.offset });
+    } catch (err) {
+      // The update is already durably queued; a failed offset write must not
+      // strand it until a restart. The stale offset re-serves the update later
+      // and the queue file plus the in-flight set deduplicate it. Spec 0020.
+      this.log(`[telegram] offset write failed: ${err.message}`);
+    }
     if (queuePath) this.dispatch(admitted, queuePath);
   }
 

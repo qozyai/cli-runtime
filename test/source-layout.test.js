@@ -87,6 +87,21 @@ test("core does not import surface", () => {
   assert.deepEqual(problems, []);
 });
 
+// Guarantee 6's structural half: provider names are vocabulary, and vocabulary
+// lives in drivers/ (and the parser, which is where the guarantee draws its
+// line). A literal "claude" or "codex" anywhere else in core/ or surface/ means
+// a third driver would have to touch that file too. Spec 0020.
+test("provider names stay behind the parser and the drivers seam", () => {
+  const offenders = [];
+  for (const file of collect(SRC)) {
+    if (!file.bucket || file.bucket === "drivers") continue;
+    if (file.bucket === "core" && file.name === "artifact-parser.js") continue;
+    const text = fs.readFileSync(file.path, "utf8");
+    if (/["'](?:claude|codex)["']/.test(text)) offenders.push(`${file.bucket}/${file.name}`);
+  }
+  assert.deepEqual(offenders, []);
+});
+
 // The analyser's own failure modes, proven rather than assumed.
 function fixture(tree) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "layout-"));

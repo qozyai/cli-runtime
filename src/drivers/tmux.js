@@ -8,6 +8,14 @@ const execFileAsync = promisify(execFile);
 const EXIT_STATUS_WAIT_MS = 250;
 const EXIT_STATUS_POLL_MS = 25;
 
+// tmux parses a trailing ";" in any argument as a command separator, even when
+// the argument arrives via argv, and silently drops it from the typed text.
+// Escaping only that trailing semicolon keeps the argument one command;
+// interior semicolons were never at risk. Spec 0020.
+function literalSendArgument(text) {
+  return text.endsWith(";") ? `${text.slice(0, -1)}\\;` : text;
+}
+
 class Tmux {
   constructor(socketName = "qozyai-cli-runtime") {
     this.socketName = socketName;
@@ -103,7 +111,7 @@ class Tmux {
 
   async sendLiteral(sessionName, value) {
     if (!String(value || "")) return;
-    await this.run(["send-keys", "-t", sessionName, "-l", "--", String(value)]);
+    await this.run(["send-keys", "-t", sessionName, "-l", "--", literalSendArgument(String(value))]);
   }
 
   async pasteFile(sessionName, filePath, bufferName) {
@@ -128,4 +136,4 @@ class Tmux {
   }
 }
 
-module.exports = { Tmux };
+module.exports = { Tmux, literalSendArgument };

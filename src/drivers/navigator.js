@@ -78,12 +78,17 @@ class Navigator {
         body = await this.openaiHelper.navigationDecision(payload);
       }
       const decision = normalizeDecision(body);
-      await this.eventStore?.append("navigation.decision", {
+      // Same rule as every other event append: observability never fails the
+      // work it records. The navigation call is already paid for by this point,
+      // and an unwritable event log must not discard its decision. Spec 0020.
+      this.eventStore?.append("navigation.decision", {
         sessionKey,
         driver,
         phase,
         action: decision.action,
         reason: decision.reason,
+      }).catch((err) => {
+        process.stderr.write(`[cli-runtime] event append failed (navigation.decision): ${err.message}\n`);
       });
       return decision;
     } finally {
