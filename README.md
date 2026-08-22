@@ -112,9 +112,10 @@ POST   /v1/auth/:driver/submit
 ```
 
 Submission progress contains a bounded summary, up to three plaintext
-reasoning chunks exposed by the provider, and up to three tool records shaped
-as `{id, tool, success, error}`. Successful tool output and tool arguments are
-not retained in normalized state.
+reasoning chunks exposed by the provider, and the most recent tool record
+shaped as `{id, tool, success, error}`. Durable history keeps the full tool
+sequence; live progress shows only the tool running now. Successful tool
+output and tool arguments are not retained in normalized state.
 
 Output acknowledgement accepts optional individual IDs:
 
@@ -206,7 +207,8 @@ concurrent. `/status`, `/stop`, and bare `/project` run immediately. `/project <
 Switching projects releases the old pane but preserves its provider conversation
 for resumption when selected again.
 
-Only the bound owner can instruct a driver. The owner can start using the bot in
+Only the bound owner can instruct a driver (see the system-ingress override
+below for the one configurable exception). The owner can start using the bot in
 a group without discovering its numeric chat ID or restarting the adapter;
 Telegram privacy settings still determine which group messages reach the bot.
 Group members can read prompts and replies, and Telegram may deliver their
@@ -228,6 +230,15 @@ bind its non-bot `from.id`; the chat allowlist cannot bypass that proof. The raw
 single-use code is never stored by the runtime. Once bound, the durable owner ID
 replaces both enrollment mechanisms and group/topic routes are derived from
 Telegram updates.
+
+`CLI_RUNTIME_TELEGRAM_SYSTEM_INGRESS_CHATS` is a deliberate, default-off
+override of the owner-only rule: a comma-separated list of up to 32 Telegram
+user IDs whose private messages are admitted after enrollment and re-routed
+into the owner's main private route as system interventions. The owner sees a
+visible provenance banner for every such message, and the submitted prompt is
+wrapped in a `<system-intervention>` marker naming the sender. Anyone listed
+can drive the owner's agent; leave it unset unless a supervising operator
+needs exactly that.
 
 Text, documents, photos, audio, voice, video, and video notes are accepted. Files are
 acknowledged individually after delivery; oversized or failed siblings are
@@ -304,3 +315,56 @@ pane tail, and use a strict action schema. Navigation is never consulted after
 a submission binds; vendor artifacts remain the completion authority.
 
 See [`docs/guides/turn-state.md`](docs/guides/turn-state.md) for workspace state and retention.
+
+## Configuration reference
+
+Every variable the runtime reads. Those covered in their own sections above are
+listed once here for completeness; unset values use the default.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `CLI_RUNTIME_STATE_DIR` | `~/.local/state/qozyai-cli-runtime` | Private runtime state. |
+| `CLI_RUNTIME_SOCKET` | `<state>/runtime.sock` | Unix socket the daemon serves. |
+| `CLI_RUNTIME_TMUX_SOCKET` | `qozyai-cli-runtime` | tmux server socket name for driver panes. |
+| `CLI_RUNTIME_STARTUP_TIMEOUT_MS` | `30000` | Limit for a launched driver to reach its composer. |
+| `CLI_RUNTIME_BIND_TIMEOUT_MS` | `15000` | Limit for a pasted prompt to be accepted and bind. |
+| `CLI_RUNTIME_ARTIFACT_POLL_MS` | `150` | Artifact poll interval while a turn runs. |
+| `CLI_RUNTIME_SUBMISSION_TIMEOUT_MS` | `0` | Absolute post-bind limit; `0` disables. |
+| `CLI_RUNTIME_SUBMISSION_INACTIVITY_MS` | `1800000` | Silence before a bound turn is stuck; `0` disables. |
+| `CLI_RUNTIME_TIMEOUT_SETTLE_MS` | `5000` | Grace for the driver to settle after a timeout interrupt. |
+| `CLI_RUNTIME_OPERATIONAL_RECORD_KEEP` | `1000` | Terminal submission records kept (floor 100). |
+| `CLI_RUNTIME_OPERATIONAL_RECORD_GRACE_MS` | `600000` | Age a terminal record must reach before pruning. |
+| `CLI_RUNTIME_CLAUDE_COMMAND` / `CODEX_COMMAND` | `claude` / `codex` | Driver executables. |
+| `CLI_RUNTIME_CLAUDE_HOME` / `CODEX_HOME` | `$HOME` | Per-driver home for credentials and artifacts. |
+| `CLI_RUNTIME_CLAUDE_VERSION` / `CODEX_VERSION` | unset | Release version pins, verified at startup. |
+| `CLI_RUNTIME_DRIVER_VERSION_ENFORCE` | `warn` | `block` refuses startup on a pin mismatch. |
+| `CLI_RUNTIME_CLAUDE_MODEL` / `CODEX_MODEL` | unset | Model override passed to the driver. |
+| `CLI_RUNTIME_CLAUDE_PERMISSION_MODE` | `bypassPermissions` | Claude Code permission mode. |
+| `CLI_RUNTIME_CODEX_SANDBOX` | `danger-full-access` | Codex sandbox mode. |
+| `CLI_RUNTIME_CODEX_APPROVAL` | `never` | Codex approval policy. |
+| `CLI_RUNTIME_CLAUDE_ARGS` / `CODEX_ARGS` | `[]` | Extra driver arguments, JSON string array. |
+| `CLI_RUNTIME_TELEGRAM_DRIVER` | `claude` | Default driver for unbound routes; validated at load. |
+| `CLI_RUNTIME_TELEGRAM_DEFAULT_PROJECT` | unset | Project preselected on unbound routes. |
+| `CLI_RUNTIME_TELEGRAM_PROJECTS_ROOT` | required | Project catalog root for the adapter. |
+| `CLI_RUNTIME_TELEGRAM_ALLOWED_CHATS` | empty | Owner-enrollment allowlist (pre-enrollment only). |
+| `CLI_RUNTIME_TELEGRAM_OWNER_ENROLLMENT_CODE_HASH` | unset | Managed enrollment code digest. |
+| `CLI_RUNTIME_TELEGRAM_SYSTEM_INGRESS_CHATS` | unset | Non-owner system-ingress override; see above. |
+| `CLI_RUNTIME_TELEGRAM_STATUS_EDIT_MS` | `5000` | Minimum interval between status bubble edits. |
+| `CLI_RUNTIME_TELEGRAM_REQUEST_TIMEOUT_MS` | `30000` | Telegram API request timeout; keep above the 25s long poll. |
+| `CLI_RUNTIME_TELEGRAM_MAX_FILE_BYTES` | `20971520` | Attachment download ceiling. |
+| `CLI_RUNTIME_TELEGRAM_BURST_DEBOUNCE_MS` | `200` | Burst joining quiet period; `0` disables. |
+| `CLI_RUNTIME_TELEGRAM_BURST_MAX_WAIT_MS` | `2000` | Burst joining total wait ceiling. |
+| `CLI_RUNTIME_TELEGRAM_BURST_MAX_PARTS` | `25` | Burst joining part ceiling. |
+| `CLI_RUNTIME_TELEGRAM_NOTICE_POLL_MS` | `1000` | Notice spool drain interval. |
+| `CLI_RUNTIME_RESTART_ANNOUNCE_WINDOW_MS` | `300000` | Crash-announcement collapse window. |
+| `CLI_RUNTIME_TELEGRAM_ATTACH_SERVICE_URL` | unset | External terminal-attachment service. |
+| `CLI_RUNTIME_TELEGRAM_ATTACH_SERVICE_TIMEOUT_MS` | `45000` | Attachment service request timeout. |
+| `CLI_RUNTIME_NAVIGATOR_URL` / `NAVIGATOR_API_KEY` | unset | External navigator endpoint and key. |
+| `CLI_RUNTIME_NAVIGATOR_TIMEOUT_MS` | `15000` | Navigator request timeout. |
+| `CLI_RUNTIME_NAVIGATOR_MODEL` | `gpt-5.6-luna` | Model for direct OpenAI navigation. |
+| `CLI_RUNTIME_OPENAI_NAVIGATOR` | `0` | `1` enables direct OpenAI navigation. |
+| `OPENAI_API_KEY` | unset | Enables transcription and direct navigation. |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible endpoint override. |
+| `CLI_RUNTIME_TRANSCRIPTION_MODEL` | `gpt-4o-transcribe` | Audio transcription model. |
+| `CLI_RUNTIME_TRANSCRIPTION_TIMEOUT_MS` | `60000` | Transcription request timeout. |
+| `CLI_RUNTIME_INSTALL_DIR` | XDG data path | Installer-owned; where `install.sh` maintains the clone. |

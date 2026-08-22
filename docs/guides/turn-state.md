@@ -39,9 +39,10 @@ to read the entire file. This avoids terminal paste ambiguity without adding
 runtime files to the user's workspace.
 
 While work is active, `history/active/<submission-id>.json` contains the latest
-artifact cursor, provider session ID, three bounded reasoning chunks, three tool
-records shaped as `{id, tool, success, error}`, and a 500-character summary.
-Tool arguments and successful tool output are excluded.
+artifact cursor, provider session ID, three bounded reasoning chunks, the most
+recent tool record shaped as `{id, tool, success, error}`, and a summary capped
+at 900 characters. Tool arguments and successful tool output are excluded; the
+finished turn's history record keeps the full tool sequence.
 
 A bound turn is not limited by elapsed time. It ends on a terminal artifact
 record, driver exit, caller interrupt, or silence: thirty minutes by default with

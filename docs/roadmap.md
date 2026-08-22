@@ -61,6 +61,13 @@ and whether timeout first requests a graceful interrupt remain design work.
 
 ### Burst Messages And Turn Replacement
 
+**Promoted in part to [`specs/0007-burst-joining`](specs/0007-burst-joining/spec.md),
+which is implemented.** What shipped is pre-turn joining: messages that
+arrive together are debounced into one turn. The replacement flow described
+below, superseding a turn already running, was deliberately not built; mid-turn
+messages still queue. The rest of this entry is the intake note that produced
+the spec.
+
 **Requested:** Decide how to handle several messages sent without waiting for
 the current answer. Candidate behaviors are:
 
