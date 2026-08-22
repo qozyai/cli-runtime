@@ -1216,6 +1216,165 @@ test("Telegram reset is an ordered route barrier after immediate interruption", 
   assert.deepEqual(order, ["interrupt", "slow", "reset", "after"]);
 });
 
+test("Telegram rejoins its own in-flight submission instead of reporting attention", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-rejoin-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const adapter = new TelegramAdapter({
+    config: {
+      stateDir: root,
+      socketPath: path.join(root, "runtime.sock"),
+      telegram: { token: "token", defaultDriver: "claude", projectsRoot: root, allowedChatIds: new Set() },
+    },
+    fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true, result: { message_id: 1 } }) }),
+  });
+  await adapter.init();
+  await bindRoute(adapter, root);
+  // The daemon is mid-turn on this very update: a crashed adapter replaying its
+  // queue, or a retry after a failed status send. The daemon checks idempotency
+  // before the busy refusal, so the POST returns the running submission.
+  adapter.ensureSession = async () => ({ status: "running", activeSubmissionId: "sub-mine" });
+  const runtimeCalls = [];
+  let submittedIdempotencyKey = null;
+  adapter.runtime = async (method, requestPath, body) => {
+    runtimeCalls.push(`${method} ${requestPath}`);
+    if (method === "POST" && requestPath.endsWith("/submissions")) {
+      submittedIdempotencyKey = body.idempotencyKey;
+      return { submission: { submissionId: "sub-mine" } };
+    }
+    throw new Error(`unexpected runtime call: ${method} ${requestPath}`);
+  };
+  adapter.waitSubmission = async () => ({
+    submissionId: "sub-mine",
+    status: "completed",
+    reply: "recovered reply",
+    outputs: [],
+  });
+  adapter.typing = async () => {};
+  adapter.sendStatus = async () => ({ message_id: 10 });
+  const sent = [];
+  adapter.send = async (_message, text) => { sent.push(text); };
+  const finalized = [];
+  adapter.finalizeStatus = async (_message, _messageId, text) => { finalized.push(text); };
+
+  await adapter.handle({ chat: { id: 42 }, message_id: 9, text: "replayed message" });
+
+  assert.equal(runtimeCalls.some((call) => call.includes("/auth/")), false);
+  assert.equal(sent.some((text) => /needs attention/.test(text)), false);
+  assert.equal(submittedIdempotencyKey, "telegram:42:9");
+  assert.deepEqual(finalized, ["recovered reply"]);
+});
+
+test("Telegram reports a genuine busy conflict as busy, not as attention", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-busy-conflict-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const adapter = new TelegramAdapter({
+    config: {
+      stateDir: root,
+      socketPath: path.join(root, "runtime.sock"),
+      telegram: { token: "token", defaultDriver: "claude", projectsRoot: root, allowedChatIds: new Set() },
+    },
+    fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true, result: { message_id: 1 } }) }),
+  });
+  await adapter.init();
+  await bindRoute(adapter, root);
+  adapter.ensureSession = async () => ({ status: "running", activeSubmissionId: "sub-other" });
+  const runtimeCalls = [];
+  adapter.runtime = async (method, requestPath) => {
+    runtimeCalls.push(`${method} ${requestPath}`);
+    if (method === "POST" && requestPath.endsWith("/submissions")) {
+      throw Object.assign(new Error("session already has an active submission"), {
+        code: "SESSION_BUSY",
+        statusCode: 409,
+      });
+    }
+    throw new Error(`unexpected runtime call: ${method} ${requestPath}`);
+  };
+  adapter.typing = async () => {};
+  const sent = [];
+  adapter.send = async (_message, text) => { sent.push(text); };
+
+  await adapter.handle({ chat: { id: 42 }, message_id: 12, text: "second message" });
+
+  assert.equal(runtimeCalls.some((call) => call.includes("/auth/")), false);
+  assert.equal(sent.some((text) => /needs attention/.test(text)), false);
+  assert.ok(sent.some((text) => /still working/i.test(text)));
+});
+
+test("Telegram delivers the reply even when the status bubble cannot be sent", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-no-bubble-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const adapter = new TelegramAdapter({
+    config: {
+      stateDir: root,
+      socketPath: path.join(root, "runtime.sock"),
+      telegram: { token: "token", defaultDriver: "claude", projectsRoot: root, allowedChatIds: new Set() },
+    },
+    fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true, result: { message_id: 1 } }) }),
+  });
+  await adapter.init();
+  await bindRoute(adapter, root);
+  adapter.ensureSession = async () => ({ status: "ready" });
+  adapter.runtime = async (method, requestPath) => {
+    if (method === "POST" && requestPath.endsWith("/submissions")) {
+      return { submission: { submissionId: "sub-quiet" } };
+    }
+    throw new Error(`unexpected ${method} ${requestPath}`);
+  };
+  adapter.typing = async () => {};
+  adapter.sendStatus = async () => { throw new Error("Too Many Requests: retry after 30"); };
+  let waitedWithMessageId;
+  adapter.waitSubmission = async (_message, submissionId, statusMessageId) => {
+    waitedWithMessageId = statusMessageId;
+    return { submissionId, status: "completed", reply: "quiet reply", outputs: [] };
+  };
+  const sent = [];
+  adapter.send = async (_message, text) => { sent.push(text); };
+  const finalized = [];
+  adapter.finalizeStatus = async (_message, _messageId, text) => { finalized.push(text); };
+
+  await adapter.handle({ chat: { id: 42 }, message_id: 13, text: "quiet turn" });
+
+  assert.equal(waitedWithMessageId, undefined);
+  assert.deepEqual(finalized, ["quiet reply"]);
+  assert.equal(sent.some((text) => /Runtime error/.test(text)), false);
+});
+
+test("Telegram honours retry_after instead of failing the send", async () => {
+  const calls = [];
+  const adapter = new TelegramAdapter({
+    config: {
+      stateDir: "/tmp",
+      telegram: { token: "token", defaultDriver: "claude", projectsRoot: "/tmp", allowedChatIds: new Set() },
+    },
+    fetchImpl: async (url) => {
+      calls.push(url.split("/").pop());
+      if (calls.length === 1) {
+        return {
+          ok: false,
+          json: async () => ({
+            ok: false,
+            error_code: 429,
+            description: "Too Many Requests: retry after 1",
+            parameters: { retry_after: 0.05 },
+          }),
+        };
+      }
+      return { ok: true, json: async () => ({ ok: true, result: { message_id: 7 } }) };
+    },
+  });
+  const result = await adapter.api("sendMessage", { chat_id: 42, text: "paced" });
+  assert.equal(result.message_id, 7);
+  assert.deepEqual(calls, ["sendMessage", "sendMessage"]);
+
+  // Anything without retry_after keeps failing loudly.
+  calls.length = 0;
+  adapter.fetch = async () => ({
+    ok: false,
+    json: async () => ({ ok: false, error_code: 400, description: "Bad Request: chat not found" }),
+  });
+  await assert.rejects(() => adapter.api("sendMessage", { chat_id: 42, text: "x" }), /chat not found/);
+});
+
 test("Telegram reports a terminal handler error and retires its queue record", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-visible-error-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

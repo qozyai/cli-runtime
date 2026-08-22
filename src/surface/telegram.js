@@ -19,6 +19,15 @@ const BARRIER_COMMANDS = new Set(["project", "reset", "driver"]);
 const TELEGRAM_REQUEST_TIMEOUT_MS = 30_000;
 const TELEGRAM_ATTACH_SERVICE_TIMEOUT_MS = 45_000;
 const TELEGRAM_RICH_MESSAGE_LIMIT = 32_768;
+// Spec 0019. Telegram's 429 carries the exact wait it wants; obeying it is the
+// difference between a delayed reply and a stranded one. The cap covers the
+// per-chat limits seen in practice while refusing a pathological value.
+const TELEGRAM_RATE_LIMIT_RETRIES = 3;
+const TELEGRAM_RATE_LIMIT_MAX_WAIT_MS = 65_000;
+const TELEGRAM_CHUNK_PACING_MS = 300;
+// The daemon's own busy vocabulary. A session in one of these states is working,
+// not broken, and must not be answered with the attention flow.
+const BUSY_SESSION_STATES = new Set(["preparing", "submitting", "running", "interrupting"]);
 const SYSTEM_INGRESS = Symbol("telegram-system-ingress");
 
 function chunks(text, max = 4000) {
@@ -243,20 +252,27 @@ class TelegramAdapter {
   }
 
   async api(method, body = {}) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.config.telegram.requestTimeoutMs || TELEGRAM_REQUEST_TIMEOUT_MS);
-    try {
-      const response = await this.fetch(`https://api.telegram.org/bot${this.config.telegram.token}/${method}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-      const result = await response.json();
-      if (!response.ok || !result.ok) throw new Error(result.description || `Telegram ${method} failed`);
-      return result.result;
-    } finally {
-      clearTimeout(timer);
+    for (let attempt = 0; ; attempt += 1) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), this.config.telegram.requestTimeoutMs || TELEGRAM_REQUEST_TIMEOUT_MS);
+      try {
+        const response = await this.fetch(`https://api.telegram.org/bot${this.config.telegram.token}/${method}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+        const result = await response.json();
+        if (response.ok && result.ok) return result.result;
+        const retryAfterSeconds = Number(result?.parameters?.retry_after);
+        if (retryAfterSeconds > 0 && attempt < TELEGRAM_RATE_LIMIT_RETRIES) {
+          await sleep(Math.min(retryAfterSeconds * 1000, TELEGRAM_RATE_LIMIT_MAX_WAIT_MS));
+          continue;
+        }
+        throw new Error(result.description || `Telegram ${method} failed`);
+      } finally {
+        clearTimeout(timer);
+      }
     }
   }
 
@@ -288,7 +304,11 @@ class TelegramAdapter {
 
   async send(message, text) {
     const sent = [];
-    for (const part of chunks(text)) {
+    for (const [index, part] of chunks(text).entries()) {
+      // A long reply is many consecutive sends into one chat, which is exactly
+      // what provokes the per-chat limit. Pacing between chunks keeps the 429
+      // path the exception rather than the rule for every long answer.
+      if (index > 0) await sleep(TELEGRAM_CHUNK_PACING_MS);
       sent.push(await this.api("sendMessage", {
         chat_id: message.chat.id,
         ...this.topicFields(message),
@@ -367,7 +387,10 @@ class TelegramAdapter {
     const parts = chunks(value);
     const edited = await this.editStatus(message, messageId, parts[0] || " ");
     if (!edited) return this.send(message, value);
-    for (const part of parts.slice(1)) await this.send(message, part);
+    for (const part of parts.slice(1)) {
+      await sleep(TELEGRAM_CHUNK_PACING_MS);
+      await this.send(message, part);
+    }
     return [edited];
   }
 
@@ -1076,7 +1099,12 @@ class TelegramAdapter {
           return;
         }
       }
-      if (session.status !== "ready") {
+      // Spec 0019. A busy session is not a broken one, and it may be busy with this
+      // very update: a crashed adapter replaying its queue, or a retry after a failed
+      // status send. The daemon checks the idempotency key before the busy refusal,
+      // so the POST below rejoins that turn; only a genuinely different message is
+      // refused, and that refusal is reported as busy, never as attention.
+      if (session.status !== "ready" && !BUSY_SESSION_STATES.has(session.status)) {
         await this.send(message, await this.attentionMessage(route.driver, session));
         return;
       }
@@ -1116,14 +1144,21 @@ class TelegramAdapter {
         }
         this.checkOperation(operation);
       }
-      const accepted = await this.runtime("POST", `/v1/sessions/${encodeURIComponent(operation.sessionKey)}/submissions`, {
-        message: pieces.join("\n"),
-        inputs: inputs.map(({ temporary, replyContext, transcriptionError, ...input }) => ({ ...input, transcriptionError })),
-        idempotencyKey: this.submissionIdempotencyKey(message),
-        // A person typed this. Stated rather than assumed, so retention measures
-        // conversation rather than whatever else reaches the same endpoint.
-        source: SUBMISSION_SOURCE_OWNER,
-      });
+      let accepted;
+      try {
+        accepted = await this.runtime("POST", `/v1/sessions/${encodeURIComponent(operation.sessionKey)}/submissions`, {
+          message: pieces.join("\n"),
+          inputs: inputs.map(({ temporary, replyContext, transcriptionError, ...input }) => ({ ...input, transcriptionError })),
+          idempotencyKey: this.submissionIdempotencyKey(message),
+          // A person typed this. Stated rather than assumed, so retention measures
+          // conversation rather than whatever else reaches the same endpoint.
+          source: SUBMISSION_SOURCE_OWNER,
+        });
+      } catch (err) {
+        if (err.code !== "SESSION_BUSY") throw err;
+        await this.send(message, "The session is still working on an earlier message. Send this one again when it finishes, or /stop the current turn first.");
+        return;
+      }
       operation.submissionId = accepted.submission.submissionId;
       if (operation.cancelled || operation.controller.signal.aborted) {
         await this.runtime("POST", `/v1/sessions/${encodeURIComponent(operation.sessionKey)}/interrupt`, {}).catch((err) => {
@@ -1133,7 +1168,10 @@ class TelegramAdapter {
       this.checkOperation(operation);
       await this.typing(message);
       this.checkOperation(operation);
-      const statusMessage = await this.sendStatus(message);
+      // Spec 0019. The bubble is a courtesy; the accepted turn is the obligation.
+      // A failed send here degrades to polling without a status message, and
+      // finalization falls back to a fresh message on its own.
+      const statusMessage = await this.sendStatus(message).catch(() => null);
       const completed = await this.waitSubmission(message, operation.submissionId, statusMessage?.message_id);
       this.checkOperation(operation);
       if (completed.status === "interrupted") {
