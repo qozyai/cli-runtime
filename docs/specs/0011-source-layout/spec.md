@@ -2,7 +2,9 @@
 
 ## Status
 
-Planned on 2026-08-19. Not implemented.
+Planned and implemented on 2026-08-19: `ea14d32` moved the tree, `cabbbaa` added the
+enforcement test, `7a6112e` placed the per-directory contracts. This block said "Not
+implemented" for three days after the move landed; corrected 2026-08-22.
 
 ## Why this is a spec
 
@@ -86,10 +88,11 @@ substitutions, and the suite passes unchanged at 162 tests.
 
 ## Tests
 
-- [ ] The dependency test fails on the flat layout, before the move.
-- [ ] It fails on a synthetic `core → surface` import.
-- [ ] It passes on a synthetic allowed import.
-- [ ] It fails on an unmapped file in `src/` root.
-- [ ] It fails on a non-literal `require`.
-- [ ] It fails if it scanned nothing.
-- [ ] The full suite passes at 162 after the move, unchanged.
+- [x] The dependency test fails on the flat layout, before the move.
+- [x] It fails on a synthetic `core → surface` import.
+- [x] It passes on a synthetic allowed import.
+- [x] It fails on an unmapped file in `src/` root.
+- [x] It fails on a non-literal `require`.
+- [x] It fails if it scanned nothing.
+- [x] The full suite passes at 162 after the move, unchanged. (The suite has grown
+      since; 162 is the count that held on the day of the move.)

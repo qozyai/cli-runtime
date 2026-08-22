@@ -7,6 +7,11 @@ changed the runtime's sweep, the plugin was not updated, and its equivalence sui
 red within a day while carrying a rule that would have deleted memory. It stays
 disabled as a tripwire.
 
+**Corrected, 2026-08-22:** `0018` reversed the prediction above the next day. The
+floors did leave `src/`, `archive-sweep` was deleted rather than kept disabled, and
+`retention-sweep` took its place; §5 of this file records it. The withdrawal stands;
+"now nothing will be" did not.
+
 The finding in §2 survives the withdrawal and is worth keeping: the file floor is
 separable and the media floor is not. It is why "move half of it" was never the cheap
 option it looked like.

@@ -115,7 +115,8 @@ from, so opting in is a deliberate act and the default is to keep everything.
 - `plugins/retention-sweep/` — the janitor. `plugins/archive-sweep/` deleted: it was the
   90-day floor as a plugin, and this replaces it.
 
-Still to do, and the reason the two policies presently coexist: this diff is not
-deployed. The live release is `7a6112e`, which predates it, so the runtime's own age
-floors are still resident. They delete nothing today — nothing on disk is 30 days old —
-but the arrangement is the one §5 exists to end, and a deploy is what ends it.
+Deployed the same day: `release_20260820T144321Z_139d4e7`, daemon and adapter both,
+live at 2026-08-20T14:45Z, three minutes after the commit. The coexistence this
+paragraph originally described (the diff not deployed, the old floors still resident
+in the live release) lasted those three minutes; the text saying so outlived it by
+two days and was corrected 2026-08-22.

@@ -2,7 +2,11 @@
 
 ## Status
 
-Implemented on 2026-08-18.
+Implemented on 2026-08-18. **Superseded by `0018` on 2026-08-20:** both floors were
+removed from `src/` entirely, and age policy now lives in a marker file read by the
+external `retention-sweep` janitor. The rules below describe behaviour that no longer
+exists; they are kept as the record of what was built and why it moved. This note was
+missing until 2026-08-22.
 
 Two absolute age floors under the existing 48-active-hour work-cluster rule. The
 cluster rule is unchanged; this only adds ceilings it cannot express.
