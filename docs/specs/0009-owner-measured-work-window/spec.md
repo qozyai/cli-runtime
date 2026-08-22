@@ -31,8 +31,8 @@ session is 44.4 hours in two clusters: the break reappears and the budget falls 
 under the ceiling. The five sessions on the same box with no schedule were identical
 before and after, to the decimal.
 
-The failure mode this protects against is not theoretical either. An app2 agent ran
-the same failing job 16,541 times over 68 days. Transplanted here, that pattern
+The failure mode this protects against is not theoretical either. An agent on
+another host once ran the same failing job 16,541 times over 68 days. Transplanted here, that pattern
 would not merely waste CPU — it would spend the whole retention budget on the storm
 and delete every conversation that came before it.
 

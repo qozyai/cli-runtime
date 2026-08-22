@@ -120,9 +120,9 @@ Recorded so they are not re-derived:
   argument about credential blast radius must be aimed there.
 - **`.qozyai/` is already git-excluded automatically.** `ensureGitExclude()`
   (`src/core/workspace-state.js:331`, called at `:325`) appends it to
-  `.git/info/exclude` on every workspace init. Of `/code/{qozyai,hermes,pet,maintenance}`
-  only `hermes` is currently a git worktree, which is the whole explanation for the
-  observed difference. A self-ignoring `.qozyai/.gitignore` would still help a later
+  `.git/info/exclude` on every workspace init. Of the sibling project trees on the
+  dev machine, exactly one is currently a git worktree, which is the whole
+  explanation for the observed difference. A self-ignoring `.qozyai/.gitignore` would still help a later
   `git init` or a folder transfer, but it is a change under `src/` and therefore a
   core change — not the free independent fix it first appears to be.
 

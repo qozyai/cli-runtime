@@ -103,11 +103,11 @@ which the caller can create or resume a fork. Work and context accumulated up
 to that point must not be lost. `cli-runtime` must not decide whether the fork
 should actually run; that is an orchestration decision.
 
-The source audit found two relevant generations of behavior. The checked-in
-App2 monitor has soft and hard tool-count thresholds, but observes normalized
-progress and injects instructions asking the active agent to delegate. That
-particular monitor is cooperative: the agent can continue working, and its
-queued delegate starts only after the parent turn completes.
+The source audit found two relevant generations of behavior. An existing
+monitor elsewhere in the fleet has soft and hard tool-count thresholds, but
+observes normalized progress and injects instructions asking the active agent
+to delegate. That particular monitor is cooperative: the agent can continue
+working, and its queued delegate starts only after the parent turn completes.
 
 The stronger hook-based mechanism changes the feasibility assessment. A
 synchronous before-tool-call hook can enforce the budget at the execution
@@ -115,10 +115,10 @@ boundary: once the limit is reached it refuses ordinary tools, returns a
 synthetic/dummy result to close each attempted call cleanly, and permits only
 the background-handoff path. A yield/abort primitive can then unwind the
 foreground runner without another provider call. Unlike a prompt nudge, this
-actually prevents further inline tool work. The existing App2 progress monitor
-is not currently wired into those hard-gate and yield primitives, so the
-roadmap item is to combine them rather than mistake the monitor alone for the
-complete implementation.
+actually prevents further inline tool work. That existing progress monitor is
+not currently wired into those hard-gate and yield primitives, so the roadmap
+item is to combine them rather than mistake the monitor alone for the complete
+implementation.
 
 `cli-runtime` already has session-fork launch support for both Claude Code and
 Codex. Its tested path forks a settled parent after a completed turn. Creating
