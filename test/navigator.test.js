@@ -62,7 +62,7 @@ test("navigator uses the direct OpenAI helper when no endpoint is configured", a
   const navigator = new Navigator({
     config: { navigator: { url: "", apiKey: "", timeoutMs: 1000, useOpenAI: true } },
     eventStore: { append: async () => {} },
-    openaiHelper: {
+    navigation: {
       enabled: true,
       navigationDecision: async (value) => {
         payload = value;
@@ -74,6 +74,30 @@ test("navigator uses the direct OpenAI helper when no endpoint is configured", a
   assert.deepEqual(decision, { action: "auth_required", reason: "login screen" });
   assert.equal(payload.driver, "claude");
   assert.equal(payload.allowedActions.submit_text.maxChars, 256);
+});
+
+test("the navigator provisions its own OpenAI backend from config", async () => {
+  let requested = null;
+  const navigator = new Navigator({
+    config: {
+      navigator: { url: "", apiKey: "", timeoutMs: 1000, useOpenAI: true },
+      openai: { apiKey: "test-key", baseUrl: "https://api.openai.com/v1", navigatorModel: "test-model" },
+    },
+    fetchImpl: async (url, options) => {
+      requested = { url, body: JSON.parse(options.body) };
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: JSON.stringify({ action: "wait", key: null, text: null, reason: "ready" }) } }],
+        }),
+      };
+    },
+  });
+  assert.equal(navigator.enabled, true);
+  const decision = await navigator.decide({ driver: "claude", phase: "session_start", goal: "reach prompt", screen: "x" });
+  assert.equal(decision.action, "wait");
+  assert.equal(requested.url, "https://api.openai.com/v1/chat/completions");
+  assert.equal(requested.body.model, "test-model");
 });
 
 test("an unwritable event log does not discard a navigation decision", async () => {
@@ -94,7 +118,7 @@ test("an unwritable event log does not discard a navigation decision", async () 
 test("an OpenAI key does not implicitly enable terminal navigation", () => {
   const navigator = new Navigator({
     config: { navigator: { url: "", apiKey: "", timeoutMs: 1000, useOpenAI: false } },
-    openaiHelper: { enabled: true },
+    navigation: { enabled: true },
   });
   assert.equal(navigator.enabled, false);
 });

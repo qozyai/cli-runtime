@@ -2,6 +2,7 @@
 
 const { redactText } = require("../core/progress");
 const { tailText } = require("../core/util");
+const { OpenAINavigation } = require("./openai-navigation");
 
 const ACTIONS = new Set(["wait", "press_key", "submit_text", "auth_required", "fail"]);
 const KEYS = new Set(["Enter", "Escape", "Tab", "Up", "Down", "Left", "Right", ...Array.from({ length: 10 }, (_, index) => String(index))]);
@@ -25,15 +26,18 @@ function normalizeDecision(value) {
 }
 
 class Navigator {
-  constructor({ config, eventStore, openaiHelper = null, fetchImpl = fetch }) {
+  // The OpenAI backend is built here rather than injected: navigation is a
+  // drivers concern and must not depend on a chat surface existing. The
+  // parameter remains for tests. Spec 0021.
+  constructor({ config, eventStore, navigation = null, fetchImpl = fetch }) {
     this.config = config;
     this.eventStore = eventStore;
-    this.openaiHelper = openaiHelper;
+    this.navigation = navigation || new OpenAINavigation({ config, fetchImpl });
     this.fetch = fetchImpl;
   }
 
   get enabled() {
-    return Boolean(this.config.navigator.url || (this.config.navigator.useOpenAI && this.openaiHelper?.enabled));
+    return Boolean(this.config.navigator.url || (this.config.navigator.useOpenAI && this.navigation?.enabled));
   }
 
   async decide({ driver, phase, goal, screen, sessionKey = null, attempt = 1 }) {
@@ -75,7 +79,7 @@ class Navigator {
         }
         if (!response.ok) throw new Error(body?.error || `navigator returned HTTP ${response.status}`);
       } else {
-        body = await this.openaiHelper.navigationDecision(payload);
+        body = await this.navigation.navigationDecision(payload);
       }
       const decision = normalizeDecision(body);
       // Same rule as every other event append: observability never fails the

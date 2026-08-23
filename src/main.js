@@ -25,13 +25,12 @@ async function createRuntime(config = loadConfig()) {
     const eventStore = new EventStore(config.stateDir);
     await eventStore.init();
     const tmux = new Tmux(config.tmuxSocketName);
-    const openaiHelper = new OpenAIHelper({ config });
-    const navigator = new Navigator({ config, eventStore, openaiHelper });
+    const navigator = new Navigator({ config, eventStore });
     const sessions = new SessionManager({ config, tmux, eventStore, navigator });
     await sessions.init();
     const auth = new AuthManager({ config, tmux, eventStore, navigator });
     const server = createServer({ config, sessions, auth, eventStore, ownershipLock });
-    return { config, eventStore, tmux, openaiHelper, navigator, sessions, auth, server };
+    return { config, eventStore, tmux, navigator, sessions, auth, server };
   } catch (err) {
     await ownershipLock.release();
     throw err;

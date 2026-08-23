@@ -29,6 +29,29 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Run an operation under an AbortSignal that fires after timeoutMs. The signal
+// covers everything the operation does with it, including body consumption.
+async function withAbortTimeout(timeoutMs, operation) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await operation(controller.signal);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// A response body that is not JSON is a null body, but an abort is still an
+// abort: swallowing it would turn a timeout into a confusing null result.
+async function jsonOrNull(response) {
+  try {
+    return await response.json();
+  } catch (err) {
+    if (err?.name === "AbortError" || /abort/i.test(String(err?.message || ""))) throw err;
+    return null;
+  }
+}
+
 function sleepWithSignal(ms, signal) {
   if (!signal) return sleep(ms);
   if (signal.aborted) return Promise.resolve();
@@ -140,6 +163,7 @@ module.exports = {
   appendJsonl,
   createId,
   isolatedProcessEnv,
+  jsonOrNull,
   normalizeSubmissionSource,
   nowIso,
   readBody,
@@ -150,5 +174,6 @@ module.exports = {
   sleep,
   sleepWithSignal,
   tailText,
+  withAbortTimeout,
   writeAtomic,
 };

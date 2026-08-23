@@ -7,6 +7,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { loadConfig } = require("../src/config");
 const { OpenAIHelper } = require("../src/surface/openai-helper");
+const { OpenAINavigation } = require("../src/drivers/openai-navigation");
 
 test("OpenAI navigation defaults to GPT-5.6 Luna", () => {
   const config = loadConfig({ HOME: "/tmp" });
@@ -21,7 +22,7 @@ test("OpenAI helper returns a strict navigator decision", async () => {
     OPENAI_API_KEY: "test-key",
     CLI_RUNTIME_NAVIGATOR_MODEL: "test-navigator",
   });
-  const helper = new OpenAIHelper({
+  const helper = new OpenAINavigation({
     config,
     fetchImpl: async (url, options) => {
       request = { url, options, body: JSON.parse(options.body) };
@@ -75,7 +76,7 @@ test("OpenAI timeout covers response body consumption", async () => {
     CLI_RUNTIME_NAVIGATOR_TIMEOUT_MS: "30",
   });
   config.navigator.timeoutMs = 30;
-  const helper = new OpenAIHelper({
+  const helper = new OpenAINavigation({
     config,
     fetchImpl: async (_url, options) => ({
       ok: true,
@@ -94,7 +95,7 @@ test("OpenAI timeout covers response headers", async () => {
     CLI_RUNTIME_NAVIGATOR_TIMEOUT_MS: "30",
   });
   config.navigator.timeoutMs = 30;
-  const helper = new OpenAIHelper({
+  const helper = new OpenAINavigation({
     config,
     fetchImpl: (_url, options) => new Promise((_resolve, reject) => {
       options.signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })), { once: true });
