@@ -36,9 +36,10 @@ Three kinds of document, kept apart because they are read for different reasons.
 | [`0018-retention-outside`](specs/0018-retention-outside/spec.md) | Implemented and deployed. The runtime deletes by meaning; a janitor deletes by age. |
 | [`0019-adapter-reply-delivery`](specs/0019-adapter-reply-delivery/spec.md) | Implemented. The adapter can no longer lose a reply it already asked for. |
 | [`0020-review-remainders`](specs/0020-review-remainders/spec.md) | Implemented. The driver seam restored, plus the review's remaining correctness holes, each behind its missing test. |
+| [`0021-module-homes`](specs/0021-module-homes/spec.md) | Implemented. Notices moved to the surface, the navigator's backend to drivers, client.js stays by decision. |
 
 Each spec carries its own `## Status` block; that block is the authority, this
-table is the index. Number the next spec `0021-` and give it a slug describing
+table is the index. Number the next spec `0022-` and give it a slug describing
 the work, not the release.
 
 ## Guides

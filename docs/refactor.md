@@ -14,9 +14,9 @@ partly done and partly cancelled: see the Tier 2 table, which was rewritten on
 | 6. Move Tier 2 candidates out | the auth watch is built; the two archive age floors left in `0018`; the rest either stay by decision or do not exist yet |
 
 The runner lives outside this repository, at `/code/qozyai/plugins`, with its own
-`AGENTS.md`. On this machine it runs as one user unit with the queue janitor active;
-memory consolidation, the auth watch and wake are installed but disabled, each for a
-reason recorded in its own README.
+`AGENTS.md`. On this machine it runs as one user unit with five plugins: the queue
+janitor and `retention-sweep` active, memory consolidation, the auth watch and wake
+installed but disabled, each for a reason recorded in its own README.
 
 The layout below is therefore a description of the tree, not a proposal. Sections 5–6
 are still proposals.
@@ -53,13 +53,21 @@ src/
 ```
 
 **`core/`** — `session-manager`, `server`, `client`, `workspace-state`,
-`event-store`, `progress`, `notices`, `artifacts`, `artifact-parser`, `util`,
+`event-store`, `progress`, `artifacts`, `artifact-parser`, `util`,
 `runtime-lock`.
 
-**`drivers/`** — `drivers`, `driver-version`, `tmux`, `navigator`, `auth-manager`.
+**`drivers/`** — `drivers`, `driver-version`, `tmux`, `navigator`,
+`openai-navigation`, `auth-manager`.
 
-**`surface/`** — `telegram`, `openai-helper`, `project-catalog`, `owner-store`,
-`route-store`.
+**`surface/`** — `telegram`, `notices`, `openai-helper`, `project-catalog`,
+`owner-store`, `route-store`.
+
+Two modules moved after the original layout shipped (`0021`, 2026-08-23):
+`notices` to `surface/`, because its only consumer is the adapter, and the
+navigator's OpenAI backend to `drivers/`, because startup navigation exists
+with or without a chat attached. `client` stays in `core/` as the caller half
+of the socket API pair, by recorded decision in the same spec. The counts in
+§3 and §7 are the measurements from the day of the original move.
 
 ### Why `surface/` and not `adapters/`
 
@@ -140,11 +148,11 @@ needing to have read the repository root.
 
 ## 4. Known wrinkles
 
-- `notices.js` is generic but its log lines are prefixed `[telegram]`, and the
-  directory it watches is handed to it by the surface. The code is clean; the strings
-  are not. **Not fixed during the move** — it is a behaviour-adjacent edit, and mixing
-  one into a pure move is how a "no behaviour change" claim stops being true. Its own
-  commit, before or after.
+- ~~`notices.js` is generic but its log lines are prefixed `[telegram]`~~ —
+  **resolved by `0021`, 2026-08-23, by moving the module rather than editing the
+  strings.** The prefixes were correctly labeled strings in the wrong directory;
+  in `surface/` they are simply true. A structural test now fails if a module
+  only the surface uses settles in `core/` again.
 - Every line reference in the specs, the review documents and any external notes
   becomes stale. Cheap, but better known in advance than discovered afterwards.
 

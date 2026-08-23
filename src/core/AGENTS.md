@@ -14,7 +14,13 @@ spec and a test that fails without it.
 
 **Never `surface/`.** Nothing here may know that a chat application exists. This
 directory deals in session keys and workspaces. `test/source-layout.test.js` enforces
-it, and will also fail if a new file is left in `src/` root rather than placed.
+it, and will also fail if a new file is left in `src/` root rather than placed, or if
+a module only the surface uses settles here (`0021` moved `notices.js` out on exactly
+that rule).
+
+`client.js` is here on purpose: it is the caller half of the socket API pair and
+belongs beside `server.js`, even though core itself never calls its own API. The
+decision is recorded in `0021`.
 
 ## The shape of a mistake here
 
