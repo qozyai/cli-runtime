@@ -56,10 +56,10 @@ src/
 `event-store`, `progress`, `artifacts`, `artifact-parser`, `util`,
 `runtime-lock`.
 
-**`drivers/`** — `drivers`, `driver-version`, `tmux`, `navigator`,
+**`drivers/`**: `drivers`, `driver-version`, `tmux`, `navigator`,
 `openai-navigation`, `auth-manager`.
 
-**`surface/`** — `telegram`, `notices`, `openai-helper`, `project-catalog`,
+**`surface/`**: `telegram`, `notices`, `openai-helper`, `project-catalog`,
 `owner-store`, `route-store`.
 
 Two modules moved after the original layout shipped (`0021`, 2026-08-23):
@@ -148,8 +148,8 @@ needing to have read the repository root.
 
 ## 4. Known wrinkles
 
-- ~~`notices.js` is generic but its log lines are prefixed `[telegram]`~~ —
-  **resolved by `0021`, 2026-08-23, by moving the module rather than editing the
+- ~~`notices.js` is generic but its log lines are prefixed `[telegram]`~~
+  **Resolved by `0021`, 2026-08-23, by moving the module rather than editing the
   strings.** The prefixes were correctly labeled strings in the wrong directory;
   in `surface/` they are simply true. A structural test now fails if a module
   only the surface uses settles in `core/` again.
