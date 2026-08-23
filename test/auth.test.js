@@ -24,6 +24,80 @@ test("auth navigation recognizes wrapped current provider URLs", () => {
   assert.equal(manager.parseAuthPrompt("codex", codex).code, "ABCD-EFGH");
 });
 
+test("auth start walks an unknown screen to the device code and learns it", async (t) => {
+  const { Navigator } = require("../src/drivers/navigator");
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-auth-walk-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const loggedIn = path.join(root, "codex");
+  await fs.writeFile(loggedIn, "#!/bin/sh\necho 'Logged in using ChatGPT'\n", { mode: 0o700 });
+  const frames = [
+    "A brand new Codex welcome dialog nothing recognizes\nPress enter to continue",
+    "Open https://auth.openai.com/codex/device and enter ABCD-EFGH",
+  ];
+  const makeTmux = () => {
+    const state = { started: false, frame: 0, keys: [] };
+    return {
+      state,
+      has: async () => state.started,
+      kill: async () => {},
+      createShell: async () => { state.started = true; },
+      startCommand: async () => {},
+      driverState: async () => ({ paneDead: false }),
+      capture: async () => frames[state.frame],
+      sendKey: async (_session, key) => { state.keys.push(key); state.frame = 1; },
+      sendLiteral: async () => {},
+      attachCommand: () => "tmux attach",
+    };
+  };
+  const config = {
+    stateDir: root,
+    startupTimeoutMs: 8000,
+    navigator: { url: "http://navigator.test/decide", apiKey: "", timeoutMs: 1000 },
+    drivers: { codex: { command: loggedIn, homeDir: root, sandbox: "danger-full-access", approval: "never", extraArgs: [] } },
+  };
+  let modelCalls = 0;
+  const fetchImpl = async () => {
+    modelCalls += 1;
+    return {
+      ok: true,
+      json: async () => ({
+        reason: "a first-run welcome dialog is blocking the login flow",
+        steps: ["acknowledge the dialog"],
+        screen_regex: "brand new Codex welcome dialog",
+        action: "press_key",
+        key: "Enter",
+        text: null,
+      }),
+    };
+  };
+  const events = { append: async () => {} };
+
+  const tmuxA = makeTmux();
+  const managerA = new AuthManager({
+    config, tmux: tmuxA, eventStore: events,
+    navigator: new Navigator({ config, eventStore: events, fetchImpl }),
+  });
+  const started = await managerA.start("codex");
+  assert.equal(started.phase, "awaiting_browser");
+  assert.equal(started.code, "ABCD-EFGH");
+  assert.deepEqual(tmuxA.state.keys, ["Enter"]);
+  assert.equal(modelCalls, 1);
+  const probed = await managerA.status("codex");
+  assert.equal(probed.authenticated, true, "the probe confirms and commits the lesson");
+
+  // A fresh manager and navigator over the same state resolve the same
+  // screen from the library: no further model call, same keystroke.
+  const tmuxB = makeTmux();
+  const managerB = new AuthManager({
+    config, tmux: tmuxB, eventStore: events,
+    navigator: new Navigator({ config, eventStore: events, fetchImpl }),
+  });
+  const repeat = await managerB.start("codex");
+  assert.equal(repeat.phase, "awaiting_browser");
+  assert.deepEqual(tmuxB.state.keys, ["Enter"]);
+  assert.equal(modelCalls, 1, "the library answered the second attempt");
+});
+
 test("auth status distinguishes unknown command failure from unauthenticated", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-auth-state-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

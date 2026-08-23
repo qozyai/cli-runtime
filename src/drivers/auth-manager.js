@@ -36,6 +36,10 @@ class AuthManager {
     this.authDir = path.join(config.stateDir, "auth");
     this.statusCache = new Map();
     this.startLocks = new Map();
+    // Spec 0022. One pending learning attempt per driver: screens the
+    // navigator was consulted about, committed only when a status probe
+    // confirms the authentication actually happened.
+    this.attempts = new Map();
   }
 
   // Same rule as the session manager: an event append never fails an auth flow.
@@ -83,6 +87,7 @@ class AuthManager {
           email: parsed.email || null,
         };
         if (value.authenticated) this.statusCache.set(driver, { value, expiresAt: Date.now() + 60_000 });
+        if (value.authenticated) await this.settleAttempt(driver, true);
         return value;
       }
       const codexStatusText = `${result.stdout || ""}\n${result.stderr || ""}`;
@@ -94,6 +99,7 @@ class AuthManager {
         email: null,
       };
       if (value.authenticated) this.statusCache.set(driver, { value, expiresAt: Date.now() + 60_000 });
+      if (value.authenticated) await this.settleAttempt(driver, true);
       return value;
     } catch (err) {
       if (driver === "claude") {
@@ -120,6 +126,13 @@ class AuthManager {
         error: expectedUnauthenticated ? null : tailText(String(err.stderr || err.stdout || err.message || err).trim(), 3000),
       };
     }
+  }
+
+  async settleAttempt(driver, success) {
+    const attemptId = this.attempts.get(driver);
+    if (!attemptId) return;
+    this.attempts.delete(driver);
+    await this.navigator?.recordOutcome(attemptId, success);
   }
 
   async authScreen(driver) {
@@ -169,17 +182,51 @@ class AuthManager {
       HOME: selected.homeDir,
       DISABLE_AUTOUPDATER: "1",
     });
+    // A replaced terminal ends the previous learning attempt unlearned.
+    await this.settleAttempt(driver, false);
+    const attemptId = `auth:${driver}:${Date.now().toString(36)}`;
+    this.attempts.set(driver, attemptId);
     this.note("auth.started", { driver });
-    // Authentication is deliberately human-driven. Give the provider process a
-    // moment to fail fast, but do not navigate its TUI or wait for a URL.
+    // Entering credentials stays human-driven. Navigation only walks unknown
+    // pre-auth screens until the URL or device code appears, learning each
+    // one it had to ask about; the deterministic parser decides when the auth
+    // point is reached, never the model. Spec 0022.
     await sleep(100);
-    const processState = await this.tmux.driverState(sessionName).catch((err) => ({ paneDead: true, error: err.message }));
-    const screen = await this.authScreen(driver).catch(() => "");
-    const current = this.parseAuthPrompt(driver, screen);
-    if (processState.paneDead) {
-      const error = processState.error || `authentication process exited (${processState.exitCode ?? "unknown"})`;
-      this.note("auth.failed", { driver, error });
-      return { driver, authenticated: false, state: "unauthenticated", ...current, phase: "failed", error, attachCommand: this.tmux.attachCommand(sessionName) };
+    const deadline = Date.now() + Math.min(Number(this.config.startupTimeoutMs) || 30_000, 30_000);
+    // The first consult waits out screen drawing: a screen that is merely
+    // still loading resolves deterministically and must not cost a model call.
+    let nextConsultAt = Date.now() + 2000;
+    let current = { phase: "starting", url: null, code: null, screen: "" };
+    while (true) {
+      const processState = await this.tmux.driverState(sessionName).catch((err) => ({ paneDead: true, error: err.message }));
+      const screen = await this.authScreen(driver).catch(() => "");
+      current = this.parseAuthPrompt(driver, screen);
+      if (processState.paneDead) {
+        const error = processState.error || `authentication process exited (${processState.exitCode ?? "unknown"})`;
+        this.note("auth.failed", { driver, error });
+        await this.settleAttempt(driver, false);
+        return { driver, authenticated: false, state: "unauthenticated", ...current, phase: "failed", error, attachCommand: this.tmux.attachCommand(sessionName) };
+      }
+      if (current.phase !== "starting") break;
+      if (!this.navigator?.enabled || Date.now() >= deadline) break;
+      if (Date.now() >= nextConsultAt) {
+        try {
+          const decision = await this.navigator.decide({
+            driver,
+            phase: "auth",
+            goal: "Reach the driver's login screen showing its authentication URL or device code, or report a terminal failure.",
+            screen,
+            attemptId,
+          });
+          if (!decision || ["auth_required", "fail"].includes(decision.action)) break;
+          await this.navigator.apply(this.tmux, sessionName, decision);
+        } catch (err) {
+          this.note("navigation.error", { driver, phase: "auth", error: tailText(err.message || String(err), 2000) });
+          break;
+        }
+        nextConsultAt = Date.now() + 2000;
+      }
+      await sleep(300);
     }
     return { driver, authenticated: null, state: "interactive", ...current, attachCommand: this.tmux.attachCommand(sessionName) };
   }

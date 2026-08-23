@@ -84,6 +84,17 @@ function telegramSystemIngressChatIds(env) {
   return new Set(values);
 }
 
+// Spec 0022. The navigation model runs at low effort by design: the ordered
+// structured output is where the thinking happens. "none" omits the parameter.
+function navigatorEffort(env) {
+  const key = "CLI_RUNTIME_NAVIGATOR_EFFORT";
+  const value = String(env[key] || "low").trim().toLowerCase();
+  if (!["none", "minimal", "low", "medium", "high"].includes(value)) {
+    throw configError(`${key} must be one of: none, minimal, low, medium, high`);
+  }
+  return value;
+}
+
 // Spec 0020. Every sibling Telegram knob fails at load; a typo here used to
 // surface per-message instead, as an opaque runtime error on the first send.
 function telegramDefaultDriver(env) {
@@ -170,7 +181,8 @@ function loadConfig(env = process.env, { requireTelegramProjectsRoot = false } =
     openai: {
       apiKey: String(env.OPENAI_API_KEY || "").trim(),
       baseUrl: String(env.OPENAI_BASE_URL || "https://api.openai.com/v1").trim(),
-      navigatorModel: String(env.CLI_RUNTIME_NAVIGATOR_MODEL || "gpt-5.6-luna").trim(),
+      navigatorModel: String(env.CLI_RUNTIME_NAVIGATOR_MODEL || "gpt-5.6-terra").trim(),
+      navigatorEffort: navigatorEffort(env),
       transcriptionModel: String(env.CLI_RUNTIME_TRANSCRIPTION_MODEL || "gpt-4o-transcribe").trim(),
       transcriptionTimeoutMs: positiveNumber(env.CLI_RUNTIME_TRANSCRIPTION_TIMEOUT_MS, 60_000),
     },

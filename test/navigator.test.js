@@ -27,7 +27,7 @@ test("navigator exposes a bounded driver-neutral recovery contract", async () =>
     screen: "unknown screen sk-secretsecretsecret",
     sessionKey: "private-route-key",
   });
-  assert.deepEqual(decision, { action: "press_key", key: "Enter", reason: "confirm known prompt" });
+  assert.deepEqual(decision, { action: "press_key", key: "Enter", reason: "confirm known prompt", steps: [], screenRegex: null });
   assert.equal(requestBody.driver, "codex");
   assert.equal("sessionKey" in requestBody, false);
   assert.doesNotMatch(requestBody.screen, /sk-secret/);
@@ -71,7 +71,7 @@ test("navigator uses the direct OpenAI helper when no endpoint is configured", a
     },
   });
   const decision = await navigator.decide({ driver: "claude", phase: "auth", goal: "authenticate", screen: "Login required" });
-  assert.deepEqual(decision, { action: "auth_required", reason: "login screen" });
+  assert.deepEqual(decision, { action: "auth_required", reason: "login screen", steps: [], screenRegex: null });
   assert.equal(payload.driver, "claude");
   assert.equal(payload.allowedActions.submit_text.maxChars, 256);
 });
@@ -98,6 +98,77 @@ test("the navigator provisions its own OpenAI backend from config", async () => 
   assert.equal(decision.action, "wait");
   assert.equal(requested.url, "https://api.openai.com/v1/chat/completions");
   assert.equal(requested.body.model, "test-model");
+});
+
+test("a consulted screen is learned and answered from the library next time", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-navigator-library-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const config = { stateDir: root, navigator: { url: "http://navigator.test/decide", apiKey: "", timeoutMs: 1000 } };
+  let modelCalls = 0;
+  const fetchImpl = async () => {
+    modelCalls += 1;
+    return {
+      ok: true,
+      json: async () => ({
+        reason: "an unfamiliar theme dialog blocks the composer",
+        steps: ["confirm the default"],
+        screen_regex: "Choose the text style",
+        action: "press_key",
+        key: "Enter",
+        text: null,
+      }),
+    };
+  };
+  const events = { append: async () => {} };
+  const navigator = new Navigator({ config, eventStore: events, fetchImpl });
+  const first = await navigator.decide({
+    driver: "claude", phase: "auth", goal: "reach login", screen: "Choose the text style\n> Dark", attemptId: "att-1",
+  });
+  assert.equal(first.action, "press_key");
+  assert.equal(first.screenRegex, "Choose the text style");
+  assert.equal(modelCalls, 1);
+  await navigator.recordOutcome("att-1", true);
+  const second = await navigator.decide({
+    driver: "claude", phase: "auth", goal: "reach login", screen: "Choose the text style that looks best",
+  });
+  assert.equal(second.source, "library");
+  assert.equal(second.key, "Enter");
+  assert.equal(modelCalls, 1, "the library answered, not the model");
+
+  const rebooted = new Navigator({ config, eventStore: events, fetchImpl });
+  const third = await rebooted.decide({ driver: "claude", phase: "auth", goal: "reach login", screen: "Choose the text style" });
+  assert.equal(third.source, "library");
+  assert.equal(modelCalls, 1, "the lesson survived a restart");
+});
+
+test("a failed attempt teaches nothing", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-navigator-nolearn-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const config = { stateDir: root, navigator: { url: "http://navigator.test/decide", apiKey: "", timeoutMs: 1000 } };
+  let modelCalls = 0;
+  const fetchImpl = async () => {
+    modelCalls += 1;
+    return {
+      ok: true,
+      json: async () => ({
+        reason: "unknown", steps: [], screen_regex: "A dead-end dialog", action: "press_key", key: "Escape", text: null,
+      }),
+    };
+  };
+  const navigator = new Navigator({ config, eventStore: { append: async () => {} }, fetchImpl });
+  await navigator.decide({ driver: "codex", phase: "auth", goal: "g", screen: "A dead-end dialog", attemptId: "att-2" });
+  await navigator.recordOutcome("att-2", false);
+  await navigator.decide({ driver: "codex", phase: "auth", goal: "g", screen: "A dead-end dialog" });
+  assert.equal(modelCalls, 2, "the failed attempt left no lesson behind");
+});
+
+test("an invalid screen regex costs the lesson, not the action", () => {
+  const broken = normalizeDecision({ reason: "r", steps: [], screen_regex: "(", action: "press_key", key: "Enter", text: null });
+  assert.equal(broken.screenRegex, null);
+  assert.equal(broken.key, "Enter");
+  const legacy = normalizeDecision({ action: "wait", reason: "no new fields at all" });
+  assert.equal(legacy.action, "wait");
+  assert.equal(legacy.screenRegex, null);
 });
 
 test("an unwritable event log does not discard a navigation decision", async () => {

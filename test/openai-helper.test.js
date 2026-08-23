@@ -9,10 +9,16 @@ const { loadConfig } = require("../src/config");
 const { OpenAIHelper } = require("../src/surface/openai-helper");
 const { OpenAINavigation } = require("../src/drivers/openai-navigation");
 
-test("OpenAI navigation defaults to GPT-5.6 Luna", () => {
+test("OpenAI navigation defaults to GPT-5.6 Terra at low effort", () => {
   const config = loadConfig({ HOME: "/tmp" });
   assert.equal(config.telegram.statusEditIntervalMs, 5000);
-  assert.equal(config.openai.navigatorModel, "gpt-5.6-luna");
+  assert.equal(config.openai.navigatorModel, "gpt-5.6-terra");
+  assert.equal(config.openai.navigatorEffort, "low");
+  assert.equal(loadConfig({ HOME: "/tmp", CLI_RUNTIME_NAVIGATOR_EFFORT: "none" }).openai.navigatorEffort, "none");
+  assert.throws(
+    () => loadConfig({ HOME: "/tmp", CLI_RUNTIME_NAVIGATOR_EFFORT: "max" }),
+    (error) => error.code === "EX_CONFIG" && /CLI_RUNTIME_NAVIGATOR_EFFORT/.test(error.message),
+  );
 });
 
 test("OpenAI helper returns a strict navigator decision", async () => {
@@ -40,6 +46,13 @@ test("OpenAI helper returns a strict navigator decision", async () => {
   assert.equal(request.options.headers.authorization, "Bearer test-key");
   assert.equal(request.body.model, "test-navigator");
   assert.equal(request.body.response_format.json_schema.strict, true);
+  // The output order is the induced thinking: reason and plan come first,
+  // the recognition regex next, the answer last. Effort stays low.
+  assert.equal(request.body.reasoning_effort, "low");
+  const properties = Object.keys(request.body.response_format.json_schema.schema.properties);
+  assert.deepEqual(properties.slice(0, 3), ["reason", "steps", "screen_regex"]);
+  assert.match(request.body.messages[0].content, /screen_regex/);
+  assert.match(request.body.messages[0].content, /Never include session-specific values/);
 });
 
 test("OpenAI helper sends audio through the transcription endpoint", async (t) => {
