@@ -361,7 +361,8 @@ listed once here for completeness; unset values use the default.
 | `CLI_RUNTIME_TELEGRAM_ATTACH_SERVICE_TIMEOUT_MS` | `45000` | Attachment service request timeout. |
 | `CLI_RUNTIME_NAVIGATOR_URL` / `NAVIGATOR_API_KEY` | unset | External navigator endpoint and key. |
 | `CLI_RUNTIME_NAVIGATOR_TIMEOUT_MS` | `15000` | Navigator request timeout. |
-| `CLI_RUNTIME_NAVIGATOR_MODEL` | `gpt-5.6-luna` | Model for direct OpenAI navigation. |
+| `CLI_RUNTIME_NAVIGATOR_MODEL` | `gpt-5.6-terra` | Model for direct OpenAI navigation. |
+| `CLI_RUNTIME_NAVIGATOR_EFFORT` | `low` | Reasoning effort for navigation (`none` omits the parameter). |
 | `CLI_RUNTIME_OPENAI_NAVIGATOR` | `0` | `1` enables direct OpenAI navigation. |
 | `OPENAI_API_KEY` | unset | Enables transcription and direct navigation. |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible endpoint override. |
