@@ -102,6 +102,34 @@ test("provider names stay behind the parser and the drivers seam", () => {
   assert.deepEqual(offenders, []);
 });
 
+// A core module that only the surface imports is surface code in the wrong
+// directory. Core modules earn their place from core, drivers, or the
+// composition root; notices.js sat in core on exactly this gap. Spec 0021.
+test("core hosts nothing that only the surface uses", () => {
+  const files = collect(SRC);
+  const importers = new Map();
+  for (const file of files) {
+    const { literal } = requiresOf(fs.readFileSync(file.path, "utf8"));
+    for (const specifier of literal) {
+      if (!specifier.startsWith(".")) continue;
+      const resolved = path.resolve(path.dirname(file.path), specifier);
+      const relative = path.relative(SRC, resolved);
+      if (relative.split(path.sep)[0] !== "core") continue;
+      const key = relative.endsWith(".js") ? relative : `${relative}.js`;
+      if (!importers.has(key)) importers.set(key, new Set());
+      importers.get(key).add(file.bucket || "root");
+    }
+  }
+  const misplaced = [];
+  for (const file of files) {
+    if (file.bucket !== "core") continue;
+    const from = importers.get(path.relative(SRC, file.path)) || new Set();
+    const earned = from.has("core") || from.has("drivers") || from.has("root");
+    if (!earned && from.has("surface")) misplaced.push(path.relative(SRC, file.path));
+  }
+  assert.deepEqual(misplaced, []);
+});
+
 // The analyser's own failure modes, proven rather than assumed.
 function fixture(tree) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "layout-"));

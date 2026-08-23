@@ -3,7 +3,7 @@
 const fs = require("node:fs/promises");
 const crypto = require("node:crypto");
 const path = require("node:path");
-const { nowIso, readJson, writeAtomic } = require("./util");
+const { nowIso, readJson, writeAtomic } = require("../core/util");
 
 const NOTICE_KINDS = new Set(["shutdown", "startup", "info"]);
 const MAX_NOTICE_TEXT = 8000;

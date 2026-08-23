@@ -9,7 +9,7 @@ const { mimeTypeFor, safeFilename } = require("../core/progress");
 const { ProjectCatalog, validProjectName } = require("./project-catalog");
 const { OwnerStore, senderUserId, userId } = require("./owner-store");
 const { RouteStore } = require("./route-store");
-const { NoticeSpool, RunMarker, releaseIdFromPath, restartAnnouncement } = require("../core/notices");
+const { NoticeSpool, RunMarker, releaseIdFromPath, restartAnnouncement } = require("./notices");
 const { DRIVERS, driverLabel } = require("../drivers/drivers");
 
 const TELEGRAM_DOCUMENT_LIMIT = 50 * 1024 * 1024;
