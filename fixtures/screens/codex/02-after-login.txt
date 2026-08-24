@@ -1,0 +1,48 @@
+
+Welcome to Codex [v0.147.0]
+OpenAI's command-line coding agent
+
+Follow these steps to sign in with ChatGPT using device code authorization:
+
+1. Open this link in your browser and sign in to your account
+   https://auth.openai.com/codex/device
+
+2. Enter this one-time code (expires in 15 minutes)
+   ABCD-EFGH
+
+Continue only if you started this login in Codex. If a website or another person gave you this code, cancel.
+
+Successfully logged in
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Pane is dead (status 0, Mon Aug 24 08:43:49 2026)

@@ -144,16 +144,20 @@ class AuthManager {
   parseAuthPrompt(driver, screen) {
     const recent = recentScreen(screen, 100);
     const urls = terminalUrls(recent);
+    // Success is checked before the awaiting states: after a real login the
+    // pane's scrollback still shows the URL and code above the success banner,
+    // and the real frame corpus proved the old order misreported exactly that
+    // screen as still awaiting. Spec 0022.
     if (driver === "claude") {
+      if (/Login successful|Welcome back/i.test(recent)) return { phase: "completed", url: null, code: null, screen: tailText(recent, 12_000) };
       const url = urls.find((value) => /^https:\/\/(?:claude\.ai|claude\.com)\/(?:cai\/)?oauth\/authorize\?/i.test(value)) || null;
       if (url) return { phase: "awaiting_code", url, code: null, screen: tailText(recent, 12_000) };
-      if (/Login successful|Welcome back/i.test(recent)) return { phase: "completed", url: null, code: null, screen: tailText(recent, 12_000) };
     } else {
+      if (/Successfully logged in|Login successful/i.test(recent)) return { phase: "completed", url: null, code: null, screen: tailText(recent, 12_000) };
       const url = urls.find((value) => /^https:\/\/auth\.openai\.com\/codex\/device/i.test(value)) || null;
       const code = recent.match(/(?:code|enter)\s*[:：]?\s*([A-Z0-9]{4,}(?:-[A-Z0-9]{4,})+)/i)?.[1] ||
         recent.match(/\b([A-Z0-9]{4}-[A-Z0-9]{4,})\b/)?.[1] || null;
       if (url || code) return { phase: "awaiting_browser", url, code, screen: tailText(recent, 12_000) };
-      if (/Successfully logged in|Login successful/i.test(recent)) return { phase: "completed", url: null, code: null, screen: tailText(recent, 12_000) };
     }
     return { phase: "starting", url: null, code: null, screen: tailText(recent, 12_000) };
   }

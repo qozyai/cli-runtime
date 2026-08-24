@@ -1,0 +1,48 @@
+╭─── Claude Code v2.1.231 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                    │ Tips for getting started                                                                                │
+│                Welcome back Example!                │ Run /init to create a CLAUDE.md file with instructions for Claude                                       │
+│                                                    │ Note: You have launched claude in your home directory. For the best experience, launch it in a project… │
+│                       ▐▛███▜▌                      │ ─────────────────────────────────────────────────────────────────────────────────────────────────────── │
+│                      ▝▜█████▛▘                     │ What's new                                                                                              │
+│                        ▘▘ ▝▝                       │ Bug fixes and reliability improvements                                                                  │
+│     Opus 5 (1M context) · Claude Max · Example      │ Bug fixes and reliability improvements                                                                  │
+│     Example User                                    │ Cost estimates (`/cost`, status line, `--max-budget-usd`) now include the 1.1× US-only-inference premi… │
+│   /…/qozyai-cli-runtime/captures/fake-claude-home  │ /release-notes for more                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                               
+ ▎ Keep working from anywhere                            
+ ▎ Check progress or reply to any session from the mobile app, desktop app, or https://claude.ai/code/session_01NdQfEADeniUeP5sdxkWrnv. To keep a session in 
+ ▎ this terminal only, run /remote-control
+   +2 more · /status
+                                 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Try the new fullscreen renderer?
+
+  · Flicker-free output — fixes the flashing you see during long responses
+  · Mouse support — click to move your cursor or expand results
+  · Selected text auto-copies to your clipboard
+
+  ❯ 1. Yes, try it
+    2. Not now
+
+  Enter to confirm · Esc to cancel
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
