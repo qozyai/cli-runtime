@@ -18,6 +18,15 @@ function driverLabel(driver) {
   return DRIVER_LABELS[driver] || String(driver || "");
 }
 
+// How a driver's login completes: "device" flows finish entirely in the
+// browser; "code" flows hand the human a code that must come back to the
+// terminal. Provider vocabulary, so it lives here. Spec 0023.
+const DRIVER_AUTH_FLOWS = { claude: "code", codex: "device" };
+
+function driverAuthFlow(driver) {
+  return DRIVER_AUTH_FLOWS[driver] || "code";
+}
+
 // The startup dialogs a driver may show before its composer, and the keystroke
 // that answers each. Provider vocabulary, so it lives behind this seam: a third
 // driver's dialogs land here and nowhere else. Spec 0020.
@@ -194,6 +203,7 @@ module.exports = {
   artifactRoot,
   authCommand,
   buildLaunch,
+  driverAuthFlow,
   driverConfig,
   driverExit,
   driverLabel,

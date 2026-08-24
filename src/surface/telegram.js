@@ -10,7 +10,7 @@ const { ProjectCatalog, validProjectName } = require("./project-catalog");
 const { OwnerStore, senderUserId, userId } = require("./owner-store");
 const { RouteStore } = require("./route-store");
 const { NoticeSpool, RunMarker, releaseIdFromPath, restartAnnouncement } = require("./notices");
-const { DRIVERS, driverLabel } = require("../drivers/drivers");
+const { DRIVERS, driverAuthFlow, driverLabel } = require("../drivers/drivers");
 
 const TELEGRAM_DOCUMENT_LIMIT = 50 * 1024 * 1024;
 const TERMINAL_SUBMISSION_STATES = new Set(["completed", "failed", "interrupted"]);
@@ -164,6 +164,29 @@ function commandFor(message) {
   return match ? { name: match[1].toLowerCase(), argument: String(match[2] || "").trim() } : null;
 }
 
+// Spec 0023. An authorization code is one long unspaced token; anything with
+// whitespace or ordinary length is a prompt, never a code.
+function codeShaped(text) {
+  const token = String(text || "").trim();
+  return token.length >= 25 && token.length <= 512 && /^[A-Za-z0-9_\-#.]+$/.test(token);
+}
+
+function reauthInstructions(driver, auth, timeoutMs) {
+  const name = driverLabel(driver);
+  const minutes = Math.max(1, Math.round(timeoutMs / 60_000));
+  const lines = [`${name} needs authentication.`];
+  if (auth.url && driverAuthFlow(driver) === "device") {
+    lines.push("", `Open ${auth.url} and enter code ${auth.code || "(shown in the terminal)"}, then approve.`);
+    lines.push(`Nothing to send back: I will detect completion and resume your message automatically (watching for ${minutes} minutes).`);
+  } else if (auth.url) {
+    lines.push("", `Open ${auth.url}`);
+    lines.push(`Approve, then reply here with the code you receive (within ${minutes} minutes) and I will resume your message.`);
+  } else {
+    lines.push("", `The login screen has not produced its URL yet; I am watching and will send it the moment it appears (for ${minutes} minutes).`);
+  }
+  return lines.join("\n");
+}
+
 function matchesOwnerEnrollmentCode(message, expectedHash) {
   if (!/^[a-f0-9]{64}$/.test(String(expectedHash || ""))) return false;
   const command = commandFor(message);
@@ -215,6 +238,7 @@ class TelegramAdapter {
     this.bursts = new Map();
     this.inflightUpdates = new Set();
     this.retryCounts = new Map();
+    this.pendingReauth = new Map();
   }
 
   async init() {
@@ -405,21 +429,6 @@ class TelegramAdapter {
 
   async runtime(method, apiPath, body = null) {
     return request(this.config.socketPath, method, apiPath, body);
-  }
-
-  async authMessage(driver, force = false) {
-    const name = driverLabel(driver);
-    let terminal = true;
-    try {
-      await this.runtime("POST", `/v1/auth/${driver}/start`, { force });
-    } catch (err) {
-      terminal = false;
-      this.log(`[telegram] could not start ${driver} authentication terminal: ${err.message}`);
-    }
-    const lines = [`This attempt failed because ${name} needs authentication.`];
-    if (terminal) lines.push("", `Use /attach, choose ${name} authentication, complete login in the terminal, then send your message again.`);
-    else lines.push("", "The authentication terminal could not be started. Try /attach again shortly, then resend your message.");
-    return lines.join("\n");
   }
 
   async attentionMessage(driver, session) {
@@ -1088,7 +1097,7 @@ class TelegramAdapter {
         this.checkOperation(operation);
         session = restarted.session;
         if (session.status === "auth_required") {
-          await this.send(message, await this.authMessage(route.driver));
+          await this.beginReauth(message, route.driver);
           return;
         }
       }
@@ -1097,7 +1106,7 @@ class TelegramAdapter {
         this.checkOperation(operation);
         session = restarted.session;
         if (session.status === "auth_required") {
-          await this.send(message, await this.authMessage(route.driver));
+          await this.beginReauth(message, route.driver);
           return;
         }
       }
@@ -1184,7 +1193,9 @@ class TelegramAdapter {
         const current = await this.runtime("GET", `/v1/sessions/${encodeURIComponent(operation.sessionKey)}`);
         this.checkOperation(operation);
         if (current.session.status === "auth_required") {
-          await this.finalizeStatus(message, statusMessage?.message_id, await this.authMessage(route.driver));
+          await this.finalizeStatus(message, statusMessage?.message_id,
+            `${driverLabel(route.driver)} lost its authentication during the turn.`);
+          await this.beginReauth(message, route.driver);
           return;
         }
       }
@@ -1241,7 +1252,97 @@ class TelegramAdapter {
     const command = commandFor(message);
     if (command && CONTROL_COMMANDS.has(command.name)) return this.control(message, command, preparation, droppedBurst);
     if (command?.name === "start") return this.handleStart(message);
+    // Spec 0023. A route waiting on re-authentication treats a lone
+    // code-shaped token as the authorization code, not as a prompt.
+    const pending = this.pendingReauth.get(this.routeKey(message));
+    if (pending && !command && codeShaped(text)) return this.completeReauthWithCode(pending, message, text);
     return this.handleOrdinary(message, this.routeState(message), ordinal, parts);
+  }
+
+  async beginReauth(message, driver) {
+    const routeKey = this.routeKey(message);
+    const existing = this.pendingReauth.get(routeKey);
+    const timeoutMs = Number(this.config.telegram.reauthTimeoutMs) || 15 * 60_000;
+    const started = await this.runtime("POST", `/v1/auth/${encodeURIComponent(driver)}/start`, {}).catch(() => null);
+    const auth = started?.auth || {};
+    await this.send(message, reauthInstructions(driver, auth, timeoutMs)).catch(() => {});
+    if (existing) {
+      // One pending attempt per route: a second trigger refreshes the message
+      // and the clock instead of stacking watchers.
+      existing.deadlineAt = Date.now() + timeoutMs;
+      existing.urlSent = existing.urlSent || Boolean(auth.url);
+      return;
+    }
+    const pending = {
+      driver,
+      routeKey,
+      original: message,
+      deadlineAt: Date.now() + timeoutMs,
+      urlSent: Boolean(auth.url),
+      timer: null,
+    };
+    this.pendingReauth.set(routeKey, pending);
+    this.scheduleReauthPoll(pending);
+  }
+
+  scheduleReauthPoll(pending) {
+    const pollMs = Number(this.config.telegram.reauthPollMs) || 10_000;
+    pending.timer = setTimeout(async () => {
+      try {
+        if (this.pendingReauth.get(pending.routeKey) !== pending) return;
+        if (Date.now() > pending.deadlineAt) {
+          this.pendingReauth.delete(pending.routeKey);
+          await this.send(pending.original,
+            `${driverLabel(pending.driver)} authentication timed out. Resend your message to start again.`).catch(() => {});
+          return;
+        }
+        const status = await this.runtime("GET", `/v1/auth/${encodeURIComponent(pending.driver)}/status`).catch(() => null);
+        if (status?.auth?.authenticated) {
+          await this.finishReauth(pending);
+          return;
+        }
+        if (!pending.urlSent) {
+          const refreshed = await this.runtime("POST", `/v1/auth/${encodeURIComponent(pending.driver)}/start`, {}).catch(() => null);
+          if (refreshed?.auth?.url) {
+            pending.urlSent = true;
+            await this.send(pending.original,
+              reauthInstructions(pending.driver, refreshed.auth, pending.deadlineAt - Date.now())).catch(() => {});
+          }
+        }
+      } catch (err) {
+        this.log(`[telegram] reauth poll failed: ${err.message}`);
+      } finally {
+        if (this.pendingReauth.get(pending.routeKey) === pending) this.scheduleReauthPoll(pending);
+      }
+    }, pollMs);
+    pending.timer.unref?.();
+  }
+
+  async finishReauth(pending) {
+    this.pendingReauth.delete(pending.routeKey);
+    clearTimeout(pending.timer);
+    await this.send(pending.original,
+      `${driverLabel(pending.driver)} authentication complete. Resuming your message.`).catch(() => {});
+    // The message that hit the broken login is answered rather than orphaned.
+    await this.handle(pending.original).catch(async (err) => {
+      await this.send(pending.original, `Runtime error: ${err.message}`).catch(() => {});
+    });
+  }
+
+  async completeReauthWithCode(pending, message, code) {
+    let result = null;
+    try {
+      result = await this.runtime("POST", `/v1/auth/${encodeURIComponent(pending.driver)}/submit`, { code });
+    } catch (err) {
+      await this.send(message, `The code could not be submitted: ${err.message}. Reply with a fresh code, or resend your message to restart.`);
+      return;
+    }
+    if (result?.auth?.authenticated || result?.auth?.phase === "completed") {
+      await this.finishReauth(pending);
+      return;
+    }
+    await this.send(message,
+      `The code did not complete authentication (${result?.auth?.phase || "unknown"}). Reply with a fresh code, or resend your message to restart.`);
   }
 
   // Messages that arrive together are one thought. A client that splits a long paste
@@ -1542,6 +1643,8 @@ class TelegramAdapter {
       clearInterval(this.noticeTimer);
       this.noticeTimer = null;
     }
+    for (const pending of this.pendingReauth.values()) clearTimeout(pending.timer);
+    this.pendingReauth.clear();
     // Buffered parts stay on disk in the queue and re-form on the next start.
     for (const routeKey of [...this.bursts.keys()]) this.takeBurst(routeKey);
   }

@@ -24,6 +24,41 @@ test("auth navigation recognizes wrapped current provider URLs", () => {
   assert.equal(manager.parseAuthPrompt("codex", codex).code, "ABCD-EFGH");
 });
 
+test("a known startup screen is answered deterministically during auth, with no model call", async (t) => {
+  const { Navigator } = require("../src/drivers/navigator");
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-auth-known-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const theme = require("node:fs").readFileSync(path.join(__dirname, "..", "fixtures", "screens", "claude", "01-theme.txt"), "utf8");
+  const frames = [theme, "Browser did not open. Use the url below:\nhttps://claude.com/cai/oauth/authorize?client_id=abc\n\nPaste code here >"];
+  const state = { started: false, frame: 0, keys: [] };
+  const tmux = {
+    has: async () => state.started,
+    kill: async () => {},
+    createShell: async () => { state.started = true; },
+    startCommand: async () => {},
+    driverState: async () => ({ paneDead: false }),
+    capture: async () => frames[state.frame],
+    sendKey: async (_session, key) => { state.keys.push(key); state.frame = 1; },
+    sendLiteral: async () => {},
+    attachCommand: () => "tmux attach",
+  };
+  const config = {
+    stateDir: root,
+    startupTimeoutMs: 8000,
+    navigator: { url: "http://navigator.test/decide", apiKey: "", timeoutMs: 1000 },
+    drivers: { claude: { command: "/bin/true", homeDir: root, model: "", permissionMode: "bypassPermissions", extraArgs: [] } },
+  };
+  const navigator = new Navigator({
+    config,
+    eventStore: { append: async () => {} },
+    fetchImpl: async () => { throw new Error("the model must not be consulted for a known screen"); },
+  });
+  const manager = new AuthManager({ config, tmux, eventStore: { append: async () => {} }, navigator });
+  const started = await manager.start("claude");
+  assert.equal(started.phase, "awaiting_code");
+  assert.deepEqual(state.keys, ["Enter"]);
+});
+
 test("auth start walks an unknown screen to the device code and learns it", async (t) => {
   const { Navigator } = require("../src/drivers/navigator");
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-auth-walk-"));

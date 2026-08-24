@@ -554,36 +554,157 @@ test("Telegram retries an auth-required session without an auth status gate", as
   ]);
 });
 
-test("Telegram exposes a manual auth terminal after a real retry still requires login", async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-manual-auth-"));
+test("a broken login is repaired through the chat, not through attach", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-reauth-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const adapter = new TelegramAdapter({
     config: {
       stateDir: root,
       socketPath: path.join(root, "runtime.sock"),
-      telegram: { token: "token", defaultDriver: "codex", projectsRoot: root, allowedChatIds: new Set() },
+      telegram: {
+        token: "token", defaultDriver: "codex", projectsRoot: root, allowedChatIds: new Set(),
+        reauthPollMs: 25, reauthTimeoutMs: 5000,
+      },
     },
     fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true, result: { message_id: 1 } }) }),
   });
   await adapter.init();
+  t.after(() => adapter.stop());
+  await bindRoute(adapter, root, "42:main");
+  await adapter.routeStore.update("42:main", { driver: "codex", project: "project" });
+  let authenticated = false;
+  adapter.ensureSession = async () => ({ status: authenticated ? "ready" : "auth_required" });
+  const calls = [];
+  let submitted = null;
+  adapter.runtime = async (method, requestPath, body) => {
+    calls.push(`${method} ${requestPath}`);
+    if (requestPath.endsWith("/restart")) return { session: { status: authenticated ? "ready" : "auth_required" } };
+    if (requestPath === "/v1/auth/codex/start") {
+      return { auth: { phase: "awaiting_browser", url: "https://auth.openai.com/codex/device", code: "ABCD-EFGH", state: "interactive" } };
+    }
+    if (requestPath === "/v1/auth/codex/status") return { auth: { authenticated } };
+    if (method === "POST" && requestPath.endsWith("/submissions")) {
+      submitted = body;
+      return { submission: { submissionId: "sub-after-reauth" } };
+    }
+    throw new Error(`unexpected runtime call: ${method} ${requestPath}`);
+  };
+  adapter.waitSubmission = async () => ({ submissionId: "sub-after-reauth", status: "completed", reply: "original answered", outputs: [] });
+  adapter.typing = async () => {};
+  adapter.sendStatus = async () => ({ message_id: 10 });
+  const sent = [];
+  adapter.send = async (_message, text) => { sent.push(text); };
+  const finalized = [];
+  adapter.finalizeStatus = async (_message, _messageId, text) => { finalized.push(text); };
+
+  await adapter.handle({ chat: { id: 42 }, message_id: 9, text: "run my original request" });
+
+  assert.ok(sent.some((text) => /auth\.openai\.com\/codex\/device/.test(text) && /ABCD-EFGH/.test(text)));
+  assert.equal(sent.some((text) => /attach/i.test(text)), false);
+  assert.equal(adapter.pendingReauth.size, 1);
+
+  // The codex path needs nothing sent back: the poll notices the repaired
+  // login, announces it, and re-runs the original message.
+  authenticated = true;
+  const deadline = Date.now() + 3000;
+  while (!finalized.length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(finalized, ["original answered"]);
+  assert.match(submitted.message, /run my original request/);
+  assert.equal(submitted.idempotencyKey, "telegram:42:9");
+  assert.equal(adapter.pendingReauth.size, 0);
+  assert.ok(sent.some((text) => /authentication complete/i.test(text)));
+});
+
+test("a pasted code completes reauth and the original message is answered", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-reauth-code-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const adapter = new TelegramAdapter({
+    config: {
+      stateDir: root,
+      socketPath: path.join(root, "runtime.sock"),
+      telegram: {
+        token: "token", defaultDriver: "claude", projectsRoot: root, allowedChatIds: new Set(),
+        reauthPollMs: 60_000, reauthTimeoutMs: 60_000,
+      },
+    },
+    fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true, result: { message_id: 1 } }) }),
+  });
+  await adapter.init();
+  t.after(() => adapter.stop());
+  await bindRoute(adapter, root);
+  let authenticated = false;
+  adapter.ensureSession = async () => ({ status: authenticated ? "ready" : "auth_required" });
+  let submittedCode = null;
+  let submission = null;
+  adapter.runtime = async (method, requestPath, body) => {
+    if (requestPath.endsWith("/restart")) return { session: { status: authenticated ? "ready" : "auth_required" } };
+    if (requestPath === "/v1/auth/claude/start") {
+      return { auth: { phase: "awaiting_code", url: "https://claude.com/cai/oauth/authorize?x=y", code: null, state: "interactive" } };
+    }
+    if (requestPath === "/v1/auth/claude/submit") {
+      submittedCode = body.code;
+      authenticated = true;
+      return { auth: { phase: "completed", authenticated: true, state: "authenticated" } };
+    }
+    if (requestPath === "/v1/auth/claude/status") return { auth: { authenticated } };
+    if (method === "POST" && requestPath.endsWith("/submissions")) {
+      submission = body;
+      return { submission: { submissionId: "sub-resumed" } };
+    }
+    throw new Error(`unexpected runtime call: ${method} ${requestPath}`);
+  };
+  adapter.waitSubmission = async () => ({ submissionId: "sub-resumed", status: "completed", reply: "resumed reply", outputs: [] });
+  adapter.typing = async () => {};
+  adapter.sendStatus = async () => ({ message_id: 10 });
+  const sent = [];
+  adapter.send = async (_message, text) => { sent.push(text); };
+  const finalized = [];
+  adapter.finalizeStatus = async (_message, _messageId, text) => { finalized.push(text); };
+
+  await adapter.handle({ chat: { id: 42 }, message_id: 21, text: "my blocked request" });
+  assert.ok(sent.some((text) => /oauth\/authorize/.test(text) && /reply/i.test(text)));
+
+  const code = `${"A".repeat(48)}#${"B".repeat(24)}`;
+  await adapter.handle({ chat: { id: 42 }, message_id: 22, text: code });
+  assert.equal(submittedCode, code);
+  assert.deepEqual(finalized, ["resumed reply"]);
+  assert.equal(submission.idempotencyKey, "telegram:42:21", "the original message resumed, not the code message");
+  assert.equal(adapter.pendingReauth.size, 0);
+});
+
+test("an expired reauth attempt reports itself and clears", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cli-runtime-telegram-reauth-expiry-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const adapter = new TelegramAdapter({
+    config: {
+      stateDir: root,
+      socketPath: path.join(root, "runtime.sock"),
+      telegram: {
+        token: "token", defaultDriver: "codex", projectsRoot: root, allowedChatIds: new Set(),
+        reauthPollMs: 25, reauthTimeoutMs: 100,
+      },
+    },
+    fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true, result: { message_id: 1 } }) }),
+  });
+  await adapter.init();
+  t.after(() => adapter.stop());
   await bindRoute(adapter, root, "42:main");
   await adapter.routeStore.update("42:main", { driver: "codex", project: "project" });
   adapter.ensureSession = async () => ({ status: "auth_required" });
-  const calls = [];
   adapter.runtime = async (method, requestPath) => {
-    calls.push(`${method} ${requestPath}`);
     if (requestPath.endsWith("/restart")) return { session: { status: "auth_required" } };
-    if (requestPath === "/v1/auth/codex/start") return { auth: { phase: "interactive" } };
+    if (requestPath === "/v1/auth/codex/start") return { auth: { phase: "starting", url: null, code: null } };
+    if (requestPath === "/v1/auth/codex/status") return { auth: { authenticated: false } };
     throw new Error(`unexpected runtime call: ${method} ${requestPath}`);
   };
   const sent = [];
   adapter.send = async (_message, text) => { sent.push(text); };
 
-  await adapter.handle({ chat: { id: 42 }, message_id: 9, text: "try logged out" });
-
-  assert.equal(calls.some((call) => call.includes("/auth/codex/status")), false);
-  assert.equal(calls.at(-1), "POST /v1/auth/codex/start");
-  assert.ok(sent.some((text) => /Use \/attach.*Codex authentication/s.test(text)));
+  await adapter.handle({ chat: { id: 42 }, message_id: 31, text: "stuck request" });
+  const deadline = Date.now() + 3000;
+  while (adapter.pendingReauth.size > 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(adapter.pendingReauth.size, 0);
+  assert.ok(sent.some((text) => /timed out/i.test(text)));
 });
 
 test("Telegram exposes a manual terminal after an unclassified startup failure", async (t) => {

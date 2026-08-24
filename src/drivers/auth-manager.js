@@ -4,7 +4,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
-const { authCommand, driverConfig, isReady, normalizeDriver, recentScreen } = require("./drivers");
+const { authCommand, driverConfig, isReady, normalizeDriver, recentScreen, startupScreenAction } = require("./drivers");
 const { isolatedProcessEnv, safeId, sleep, tailText } = require("../core/util");
 
 const execFileAsync = promisify(execFile);
@@ -200,6 +200,7 @@ class AuthManager {
     // The first consult waits out screen drawing: a screen that is merely
     // still loading resolves deterministically and must not cost a model call.
     let nextConsultAt = Date.now() + 2000;
+    let lastKnownScreen = null;
     let current = { phase: "starting", url: null, code: null, screen: "" };
     while (true) {
       const processState = await this.tmux.driverState(sessionName).catch((err) => ({ paneDead: true, error: err.message }));
@@ -212,7 +213,23 @@ class AuthManager {
         return { driver, authenticated: false, state: "unauthenticated", ...current, phase: "failed", error, attachCommand: this.tmux.attachCommand(sessionName) };
       }
       if (current.phase !== "starting") break;
-      if (!this.navigator?.enabled || Date.now() >= deadline) break;
+      if (Date.now() >= deadline) break;
+      // Spec 0023. Screens the runtime already knows cost neither a model call
+      // nor a library entry. The latch stops the same lingering screen being
+      // answered twice into the composer.
+      const known = startupScreenAction(driver, screen);
+      if (known && screen !== lastKnownScreen) {
+        lastKnownScreen = screen;
+        if (/^[0-9]$/.test(known)) {
+          await this.tmux.sendLiteral(sessionName, known);
+          await this.tmux.sendKey(sessionName, "Enter");
+        } else {
+          await this.tmux.sendKey(sessionName, known);
+        }
+        await sleep(300);
+        continue;
+      }
+      if (!this.navigator?.enabled) break;
       if (Date.now() >= nextConsultAt) {
         try {
           const decision = await this.navigator.decide({

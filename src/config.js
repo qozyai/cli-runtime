@@ -218,6 +218,9 @@ function loadConfig(env = process.env, { requireTelegramProjectsRoot = false } =
       burstMaxWaitMs: positiveNumber(env.CLI_RUNTIME_TELEGRAM_BURST_MAX_WAIT_MS, 2000),
       burstMaxParts: positiveNumber(env.CLI_RUNTIME_TELEGRAM_BURST_MAX_PARTS, 25),
       noticePollMs: positiveNumber(env.CLI_RUNTIME_TELEGRAM_NOTICE_POLL_MS, 1000),
+      // Spec 0023. The owner's ceiling for a chat-delivered re-authentication.
+      reauthTimeoutMs: positiveNumber(env.CLI_RUNTIME_TELEGRAM_REAUTH_TIMEOUT_MS, 15 * 60_000),
+      reauthPollMs: positiveNumber(env.CLI_RUNTIME_TELEGRAM_REAUTH_POLL_MS, 10_000),
       attachServiceUrl: String(env.CLI_RUNTIME_TELEGRAM_ATTACH_SERVICE_URL || "").trim(),
       attachServiceTimeoutMs: positiveNumber(env.CLI_RUNTIME_TELEGRAM_ATTACH_SERVICE_TIMEOUT_MS, 45_000),
       allowedChatIds: new Set(String(env.CLI_RUNTIME_TELEGRAM_ALLOWED_CHATS || "")
