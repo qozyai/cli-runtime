@@ -356,6 +356,8 @@ listed once here for completeness; unset values use the default.
 | `CLI_RUNTIME_TELEGRAM_BURST_MAX_WAIT_MS` | `2000` | Burst joining total wait ceiling. |
 | `CLI_RUNTIME_TELEGRAM_BURST_MAX_PARTS` | `25` | Burst joining part ceiling. |
 | `CLI_RUNTIME_TELEGRAM_NOTICE_POLL_MS` | `1000` | Notice spool drain interval. |
+| `CLI_RUNTIME_TELEGRAM_REAUTH_TIMEOUT_MS` | `900000` | Ceiling for a chat-delivered re-authentication attempt. |
+| `CLI_RUNTIME_TELEGRAM_REAUTH_POLL_MS` | `10000` | Poll cadence while a re-authentication is pending. |
 | `CLI_RUNTIME_RESTART_ANNOUNCE_WINDOW_MS` | `300000` | Crash-announcement collapse window. |
 | `CLI_RUNTIME_TELEGRAM_ATTACH_SERVICE_URL` | unset | External terminal-attachment service. |
 | `CLI_RUNTIME_TELEGRAM_ATTACH_SERVICE_TIMEOUT_MS` | `45000` | Attachment service request timeout. |
